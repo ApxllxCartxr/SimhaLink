@@ -17,6 +17,8 @@ import 'package:simha_link/utils/error_handler.dart';
 import 'package:simha_link/widgets/loading_widgets.dart';
 import 'package:simha_link/services/notification_service.dart';
 import 'package:simha_link/services/routing_service.dart';
+import 'package:simha_link/services/auth_service.dart';
+import 'package:simha_link/config/app_colors.dart';
 
 class MapScreen extends StatefulWidget {
   final String groupId;
@@ -38,10 +40,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   StreamSubscription<QuerySnapshot>? _groupLocationsSubscription;
   StreamSubscription<QuerySnapshot>? _poisSubscription;
   StreamSubscription<QuerySnapshot>? _emergenciesSubscription;
+  StreamSubscription<QuerySnapshot>? _volunteersSubscription;
+  StreamSubscription<QuerySnapshot>? _organizersSubscription;
   
   List<UserLocation> _groupMembers = [];
   List<POI> _pois = [];
   List<UserLocation> _emergencies = [];
+  List<UserLocation> _nearbyVolunteers = [];
+  List<UserLocation> _allVolunteers = [];
   UserLocation? _selectedMember;
   POI? _selectedPOI;
   bool _isEmergency = false;
@@ -72,6 +78,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _groupLocationsSubscription?.cancel();
     _poisSubscription?.cancel();
     _emergenciesSubscription?.cancel();
+    _volunteersSubscription?.cancel();
+    _organizersSubscription?.cancel();
     _mapController.dispose();
     super.dispose();
   }
@@ -133,11 +141,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     try {
       final location = UserLocation(
         userId: user.uid,
-        userName: user.displayName ?? 'Unknown User',
+        userName: AuthService.getUserDisplayName(user),
         latitude: locationData.latitude ?? 0,
         longitude: locationData.longitude ?? 0,
         isEmergency: _isEmergency,
         lastUpdated: DateTime.now(),
+        userRole: _userRole,
       );
 
       // Log emergency status for debugging
@@ -297,6 +306,13 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         // Start listening to emergencies if user is a volunteer
         if (_userRole == 'Volunteer') {
           _listenToEmergencies();
+          _listenToNearbyVolunteers();
+          _listenToOrganizers();
+        }
+        
+        // Start listening to volunteers if user is an organizer
+        if (_userRole == 'Organizer') {
+          _listenToAllVolunteers();
         }
       }
     } catch (e) {
@@ -304,8 +320,129 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
   }
 
+  void _listenToNearbyVolunteers() {
+    if (_userRole != 'Volunteer') return;
+    
+    print('👮 Volunteer: Listening for nearby volunteers and organizers');
+    
+    // Listen to all groups to find volunteers and organizers
+    _volunteersSubscription = FirebaseFirestore.instance
+        .collection('groups')
+        .snapshots()
+        .listen((groupSnapshot) async {
+      if (!mounted) return;
+      
+      List<UserLocation> nearbyVolunteers = [];
+      final currentLocation = _currentLocation;
+      
+      if (currentLocation == null) return;
+      
+      // Check each group for volunteer and organizer locations
+      for (final groupDoc in groupSnapshot.docs) {
+        try {
+          final locationsSnapshot = await FirebaseFirestore.instance
+              .collection('groups')
+              .doc(groupDoc.id)
+              .collection('locations')
+              .get();
+          
+          final allUsers = locationsSnapshot.docs
+              .map((doc) => UserLocation.fromMap(doc.data()))
+              .toList();
+          
+          // Filter for volunteers and organizers only
+          final staffUsers = allUsers.where((user) => 
+            user.userRole == 'Volunteer' || user.userRole == 'Organizer'
+          ).toList();
+          
+          // Filter by proximity (within reasonable distance)
+          for (final user in staffUsers) {
+            final distance = _calculateDistance(
+              currentLocation.latitude!,
+              currentLocation.longitude!,
+              user.latitude,
+              user.longitude,
+            );
+            
+            // Show volunteers/organizers within 2km range
+            if (distance <= 2000 && user.userId != FirebaseAuth.instance.currentUser?.uid) {
+              nearbyVolunteers.add(user);
+            }
+          }
+        } catch (e) {
+          print('Error fetching staff from group ${groupDoc.id}: $e');
+        }
+      }
+      
+      if (mounted) {
+        setState(() {
+          _nearbyVolunteers = nearbyVolunteers;
+        });
+        
+        print('👮 Found ${nearbyVolunteers.length} nearby volunteers/organizers');
+      }
+    });
+  }
+
+  void _listenToOrganizers() {
+    if (_userRole != 'Volunteer') return;
+    
+    // Organizers are included in the nearby volunteers listener above
+    // This method exists for consistency and future expansion
+  }
+
+  void _listenToAllVolunteers() {
+    if (_userRole != 'Organizer') return;
+    
+    print('👑 Organizer: Listening for all volunteers');
+    
+    // Listen to all groups to find volunteers
+    _organizersSubscription = FirebaseFirestore.instance
+        .collection('groups')
+        .snapshots()
+        .listen((groupSnapshot) async {
+      if (!mounted) return;
+      
+      List<UserLocation> allVolunteers = [];
+      
+      // Check each group for volunteer locations
+      for (final groupDoc in groupSnapshot.docs) {
+        try {
+          final locationsSnapshot = await FirebaseFirestore.instance
+              .collection('groups')
+              .doc(groupDoc.id)
+              .collection('locations')
+              .get();
+          
+          final volunteers = locationsSnapshot.docs
+              .map((doc) => UserLocation.fromMap(doc.data()))
+              .where((user) => user.userRole == 'Volunteer')
+              .toList();
+          
+          allVolunteers.addAll(volunteers);
+        } catch (e) {
+          print('Error fetching volunteers from group ${groupDoc.id}: $e');
+        }
+      }
+      
+      if (mounted) {
+        setState(() {
+          _allVolunteers = allVolunteers;
+        });
+        
+        print('👑 Organizer sees ${allVolunteers.length} volunteers across all groups');
+      }
+    });
+  }
+
   Future<void> _toggleEmergency() async {
     final wasEmergency = _isEmergency;
+    
+    // Show confirmation dialog before activating emergency
+    if (!wasEmergency) {
+      final shouldActivate = await _showEmergencyConfirmationDialog();
+      if (!shouldActivate) return;
+    }
     
     setState(() {
       _isEmergency = !_isEmergency;
@@ -323,12 +460,36 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         if (user != null && _currentLocation != null) {
           final emergencyUser = UserLocation(
             userId: user.uid,
-            userName: user.displayName ?? 'Unknown User',
+            userName: AuthService.getUserDisplayName(user),
             latitude: _currentLocation!.latitude!,
             longitude: _currentLocation!.longitude!,
             isEmergency: true,
             lastUpdated: DateTime.now(),
           );
+
+          // Show loading indicator
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Row(
+                  children: [
+                    SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    ),
+                    SizedBox(width: 12),
+                    Text('🚨 Sending emergency alert...'),
+                  ],
+                ),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
 
           await NotificationService.sendEmergencyNotification(
             groupId: widget.groupId,
@@ -336,13 +497,25 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           );
 
           if (mounted) {
-            ErrorHandler.showInfo(context, 'Emergency alert sent to all group members');
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('🚨 Emergency alert sent! Volunteers and group members have been notified.'),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 4),
+              ),
+            );
           }
         }
       } else if (!_isEmergency && wasEmergency) {
         // Emergency was just deactivated - show confirmation
         if (mounted) {
-          ErrorHandler.showInfo(context, 'Emergency status turned off');
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('✅ Emergency status turned off'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
         }
       }
     } catch (e) {
@@ -359,6 +532,111 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         );
       }
     }
+  }
+
+  /// Show confirmation dialog before activating emergency
+  Future<bool> _showEmergencyConfirmationDialog() async {
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: AppColors.mapEmergency, width: 2),
+          ),
+          title: Row(
+            children: [
+              Icon(Icons.warning_amber_rounded, color: AppColors.mapEmergency, size: 28),
+              const SizedBox(width: 12),
+              Text(
+                'Emergency Alert',
+                style: TextStyle(
+                  color: AppColors.textPrimary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'This will immediately alert:',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 12),
+              _buildBulletPoint('All your group members'),
+              _buildBulletPoint('Nearest volunteers within 5km'),
+              _buildBulletPoint('Send push notifications to phones'),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.backgroundLight,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: Text(
+                  'Only use this for real emergencies that require immediate assistance.',
+                  style: TextStyle(
+                    fontStyle: FontStyle.italic,
+                    color: AppColors.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              style: TextButton.styleFrom(
+                foregroundColor: AppColors.textSecondary,
+              ),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.mapEmergency,
+                foregroundColor: AppColors.textOnPrimary,
+              ),
+              child: const Text('Send Emergency Alert'),
+            ),
+          ],
+        );
+      },
+    );
+    return result ?? false;
+  }
+
+  Widget _buildBulletPoint(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Row(
+        children: [
+          Icon(
+            Icons.circle,
+            size: 6,
+            color: AppColors.textSecondary,
+          ),
+          const SizedBox(width: 8),
+          Text(
+            text,
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _findNearestGroupMember() {
@@ -422,169 +700,318 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     return earthRadius * c;
   }
 
-  bool _isUserActive(UserLocation user) {
-    final now = DateTime.now();
-    final activeThreshold = now.subtract(const Duration(minutes: 5));
-    return user.lastUpdated.isAfter(activeThreshold);
+  /// Calculate zoom-responsive marker size based on current map zoom level
+  double _getZoomResponsiveSize({double baseSize = 60, double minSize = 30, double maxSize = 80}) {
+    final zoom = _mapController.camera.zoom;
+    
+    // Scale factor based on zoom level (zoom levels typically range from 3 to 18)
+    // At zoom 15 (typical close-up), markers should be at base size
+    // At lower zoom levels, markers should be smaller
+    // At higher zoom levels, markers can be slightly larger
+    final double scaleFactor = (zoom - 10) * 0.15 + 1.0; // Adjusted scaling
+    
+    final double scaledSize = baseSize * scaleFactor;
+    
+    // Clamp the size between min and max values
+    return scaledSize.clamp(minSize, maxSize);
   }
 
-  String _getLastSeenText(UserLocation user) {
-    final now = DateTime.now();
-    final difference = now.difference(user.lastUpdated);
-    
-    if (difference.inMinutes < 1) {
-      return 'Just now';
-    } else if (difference.inMinutes < 60) {
-      return '${difference.inMinutes}m ago';
-    } else if (difference.inHours < 24) {
-      return '${difference.inHours}h ago';
-    } else {
-      return '${difference.inDays}d ago';
-    }
+  /// Calculate zoom-responsive icon size based on current map zoom level
+  double _getZoomResponsiveIconSize({double baseSize = 32, double minSize = 20, double maxSize = 40}) {
+    final zoom = _mapController.camera.zoom;
+    final double scaleFactor = (zoom - 10) * 0.1 + 1.0; // Gentler scaling for icons
+    final double scaledSize = baseSize * scaleFactor;
+    return scaledSize.clamp(minSize, maxSize);
   }
 
   List<Marker> _buildMarkers() {
     List<Marker> markers = [];
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     
-    // Add group member markers (visible to all users in the group)
-    // Filter out current user since they are shown with the black circle/ring
-    markers.addAll(_groupMembers.where((member) => member.userId != currentUserId).map((member) {
-      return Marker(
-        point: LatLng(member.latitude, member.longitude),
-        width: 60,
-        height: 60,
-        child: GestureDetector(
-          onTap: () {
-            setState(() => _selectedMember = member);
-            _calculateRoute(); // Calculate route when member is selected
-          },
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 300),
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                // Main person icon for other users
-                Icon(
-                  Icons.person_pin,
-                  color: Colors.green,
-                  size: 28,
-                ),
-                // Emergency indicator overlay
-                if (member.isEmergency)
-                  Positioned(
-                    top: 0,
-                    right: 0,
-                    child: Container(
-                      width: 16,
-                      height: 16,
-                      decoration: BoxDecoration(
-                        color: Colors.red,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.white, width: 1),
-                      ),
-                      child: const Icon(
-                        Icons.warning,
-                        color: Colors.white,
-                        size: 10,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }));
-
-    // Add emergency markers for volunteers (shows emergencies from ALL groups)
-    if (_userRole == 'Volunteer') {
+    // Role-based marker visibility
+    if (_userRole == 'Attendee') {
+      // Attendees see: Other attendees in the same group
+      markers.addAll(_groupMembers
+          .where((member) => 
+              member.userId != currentUserId && 
+              (member.userRole == 'Attendee' || member.userRole == null)) // Include users without role for backward compatibility
+          .map((member) => _buildUserMarker(member, AppColors.mapAttendee, Icons.person_pin)));
+    } else if (_userRole == 'Volunteer') {
+      // Volunteers see: Other volunteers and organizers nearby, emergencies from all groups
+      markers.addAll(_nearbyVolunteers
+          .map((volunteer) => _buildUserMarker(volunteer, 
+              volunteer.userRole == 'Volunteer' ? AppColors.mapVolunteer : AppColors.mapOrganizer, 
+              volunteer.userRole == 'Volunteer' ? Icons.local_hospital : Icons.admin_panel_settings)));
+      
+      // Add emergency markers from all groups
       markers.addAll(_emergencies.map((emergency) {
-        // Check if this emergency is already shown as a group member to avoid duplicates
-        final isAlreadyShown = _groupMembers.any((member) => 
-            member.userId == emergency.userId && member.isEmergency);
+        // Check if this emergency is already shown as a nearby volunteer to avoid duplicates
+        final isAlreadyShown = _nearbyVolunteers.any((volunteer) => 
+            volunteer.userId == emergency.userId && emergency.isEmergency);
         
-        if (isAlreadyShown) return null; // Skip if already shown in group members
+        if (isAlreadyShown) return null; // Skip if already shown
         
-        return Marker(
-          point: LatLng(emergency.latitude, emergency.longitude),
-          width: 55,
-          height: 55,
-          child: GestureDetector(
-            onTap: () {
-              setState(() => _selectedMember = emergency);
-              _calculateRoute(); // Calculate route when emergency is selected
-              // Show info about this emergency
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text('Emergency: ${emergency.userName} needs help!'),
-                  backgroundColor: Colors.red,
-                  duration: const Duration(seconds: 3),
-                ),
-              );
-            },
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.red,
-                borderRadius: BorderRadius.circular(27.5),
-                border: Border.all(color: Colors.white, width: 3),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.red.withOpacity(0.3),
-                    blurRadius: 10,
-                    spreadRadius: 2,
-                  ),
-                ],
-              ),
-              child: const Icon(
-                Icons.emergency,
-                color: Colors.white,
-                size: 28,
-              ),
-            ),
-          ),
-        );
+        return _buildEmergencyMarker(emergency);
       }).where((marker) => marker != null).cast<Marker>());
+    } else if (_userRole == 'Organizer') {
+      // Organizers see: All volunteers across all groups
+      markers.addAll(_allVolunteers
+          .map((volunteer) => _buildUserMarker(volunteer, AppColors.mapVolunteer, Icons.local_hospital)));
+      
+      // Also see other organizers in the same group
+      markers.addAll(_groupMembers
+          .where((member) => 
+              member.userId != currentUserId && 
+              member.userRole == 'Organizer')
+          .map((organizer) => _buildUserMarker(organizer, AppColors.mapOrganizer, Icons.admin_panel_settings)));
+    }
+
+    // Everyone sees their current location marker (blue like Google Maps)
+    if (_currentLocation != null && currentUserId != null) {
+      markers.add(_buildCurrentLocationMarker());
     }
 
     return markers;
   }
 
+  Marker _buildUserMarker(UserLocation user, Color color, IconData icon) {
+    final markerSize = _getZoomResponsiveSize(baseSize: 60, minSize: 30, maxSize: 80);
+    final iconSize = _getZoomResponsiveIconSize(baseSize: 32, minSize: 20, maxSize: 40);
+    final emergencySize = (iconSize * 0.5).clamp(12.0, 18.0);
+    
+    return Marker(
+      point: LatLng(user.latitude, user.longitude),
+      width: markerSize,
+      height: markerSize,
+      child: GestureDetector(
+        onTap: () {
+          setState(() => _selectedMember = user);
+          _calculateRoute();
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Main role-specific icon
+              Icon(
+                icon,
+                color: color,
+                size: iconSize,
+              ),
+              // Emergency indicator overlay
+              if (user.isEmergency)
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: Container(
+                    width: emergencySize,
+                    height: emergencySize,
+                    decoration: BoxDecoration(
+                      color: AppColors.mapEmergency,
+                      borderRadius: BorderRadius.circular(emergencySize / 2),
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    child: Icon(
+                      Icons.warning,
+                      color: Colors.white,
+                      size: emergencySize * 0.6,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Marker _buildEmergencyMarker(UserLocation emergency) {
+    final markerSize = _getZoomResponsiveSize(baseSize: 60, minSize: 30, maxSize: 80);
+    final iconSize = _getZoomResponsiveIconSize(baseSize: 28, minSize: 18, maxSize: 36);
+    
+    return Marker(
+      point: LatLng(emergency.latitude, emergency.longitude),
+      width: markerSize,
+      height: markerSize,
+      child: GestureDetector(
+        onTap: () {
+          setState(() => _selectedMember = emergency);
+          _calculateRoute();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('🚨 Emergency: ${emergency.userName} needs help!'),
+              backgroundColor: AppColors.mapEmergency,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 300),
+          child: Container(
+            decoration: BoxDecoration(
+              color: AppColors.mapEmergency,
+              borderRadius: BorderRadius.circular(markerSize / 2),
+              border: Border.all(color: Colors.white, width: 3),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.mapEmergency.withOpacity(0.4),
+                  blurRadius: 12,
+                  spreadRadius: 3,
+                ),
+              ],
+            ),
+            child: Icon(
+              Icons.emergency,
+              color: Colors.white,
+              size: iconSize,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Marker _buildCurrentLocationMarker() {
+    final markerSize = _getZoomResponsiveSize(baseSize: 40, minSize: 25, maxSize: 55);
+    final iconSize = _getZoomResponsiveIconSize(baseSize: 20, minSize: 14, maxSize: 28);
+    
+    return Marker(
+      point: LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!),
+      width: markerSize,
+      height: markerSize,
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppColors.mapCurrentUser, // Blue like Google Maps
+          borderRadius: BorderRadius.circular(markerSize / 2),
+          border: Border.all(color: Colors.white, width: 3),
+          boxShadow: [
+            BoxShadow(
+              color: AppColors.mapCurrentUser.withOpacity(0.3),
+              blurRadius: 8,
+              spreadRadius: 2,
+            ),
+          ],
+        ),
+        child: Icon(
+          Icons.my_location,
+          color: Colors.white,
+          size: iconSize,
+        ),
+      ),
+    );
+  }
+
   List<Marker> _buildPOIMarkers() {
-    // POI markers are not clustered and always visible
-    return _pois.map((poi) {
+    // Filter POIs based on user role
+    List<POI> visiblePOIs = [];
+    
+    if (_userRole == 'Attendee') {
+      // Attendees see: Organizer-set location markers (Drinking Water, Restroom, Medical Aid, Historical, etc.)
+      visiblePOIs = _pois.where((poi) => 
+          poi.type == MarkerType.drinkingWater ||
+          poi.type == MarkerType.restroom ||
+          poi.type == MarkerType.medical ||
+          poi.type == MarkerType.historical ||
+          poi.type == MarkerType.accessibility ||
+          poi.type == MarkerType.information ||
+          poi.type == MarkerType.food ||
+          poi.type == MarkerType.parking
+      ).toList();
+    } else if (_userRole == 'Volunteer') {
+      // Volunteers see: All POIs and can set high priority markers
+      visiblePOIs = _pois;
+    } else if (_userRole == 'Organizer') {
+      // Organizers see: All POIs
+      visiblePOIs = _pois;
+    } else {
+      // Default: show basic POIs
+      visiblePOIs = _pois.where((poi) => 
+          poi.type == MarkerType.information ||
+          poi.type == MarkerType.drinkingWater ||
+          poi.type == MarkerType.restroom
+      ).toList();
+    }
+    
+    return visiblePOIs.map((poi) {
+      final markerSize = _getZoomResponsiveSize(baseSize: 45, minSize: 28, maxSize: 60);
+      final fontSize = _getZoomResponsiveIconSize(baseSize: 22, minSize: 16, maxSize: 28);
+      
       return Marker(
         point: LatLng(poi.latitude, poi.longitude),
-        width: 40,
-        height: 40,
+        width: markerSize,
+        height: markerSize,
         child: GestureDetector(
           onTap: () {
             setState(() => _selectedPOI = poi);
-            _calculatePOIRoute(); // Calculate route when POI is selected
+            _calculatePOIRoute();
           },
           child: Container(
             decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.blue, width: 2),
+              color: _getPOIBackgroundColor(poi.type),
+              borderRadius: BorderRadius.circular(markerSize / 2),
+              border: Border.all(
+                color: _getPOIBorderColor(poi.type), 
+                width: 2
+              ),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withOpacity(0.2),
-                  blurRadius: 4,
-                  offset: const Offset(0, 2),
+                  blurRadius: 6,
+                  offset: const Offset(0, 3),
                 ),
               ],
             ),
             child: Center(
               child: Text(
                 POI.getPoiIcon(poi.type),
-                style: const TextStyle(fontSize: 20),
+                style: TextStyle(fontSize: fontSize),
               ),
             ),
           ),
         ),
       );
     }).toList();
+  }
+
+  Color _getPOIBackgroundColor(MarkerType type) {
+    switch (type) {
+      case MarkerType.emergency:
+        return AppColors.mapEmergency;
+      case MarkerType.medical:
+        return Colors.white;
+      case MarkerType.security:
+        return Colors.white;
+      case MarkerType.drinkingWater:
+        return Colors.white;
+      default:
+        return Colors.white;
+    }
+  }
+
+  Color _getPOIBorderColor(MarkerType type) {
+    switch (type) {
+      case MarkerType.emergency:
+        return AppColors.mapEmergency;
+      case MarkerType.medical:
+        return Colors.red.shade700;
+      case MarkerType.security:
+        return Colors.blue.shade700;
+      case MarkerType.drinkingWater:
+        return Colors.blue.shade600;
+      case MarkerType.restroom:
+        return Colors.brown.shade600;
+      case MarkerType.food:
+        return Colors.orange.shade700;
+      case MarkerType.historical:
+        return Colors.purple.shade600;
+      case MarkerType.accessibility:
+        return Colors.green.shade600;
+      case MarkerType.parking:
+        return Colors.grey.shade700;
+      default:
+        return AppColors.primary;
+    }
   }
 
   Future<void> _calculateRoute() async {
@@ -879,12 +1306,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                           border: OutlineInputBorder(),
                           helperText: 'Select category',
                         ),
-                        items: POI.poiTypes.map((type) {
+                        items: _getAvailablePOITypes().map((type) {
                           return DropdownMenuItem(
                             value: type,
                             child: Row(
                               children: [
-                                Text(POI.getPoiIcon(type)),
+                                Text(POI.getPoiIcon(MarkerType.fromString(type))),
                                 const SizedBox(width: 8),
                                 Text(type),
                               ],
@@ -973,7 +1400,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       final poi = POI(
         id: poiRef.id,
         name: name,
-        type: type,
+        type: MarkerType.fromString(type),
         latitude: location.latitude,
         longitude: location.longitude,
         description: description,
@@ -989,12 +1416,31 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         groupId: widget.groupId,
         poiName: name,
         poiType: type,
-        creatorName: user.displayName ?? 'Unknown User',
+        creatorName: AuthService.getUserDisplayName(user),
       );
 
     } catch (e) {
       rethrow; // Let the calling method handle the error
     }
+  }
+
+  List<String> _getAvailablePOITypes() {
+    if (_userRole == 'Volunteer') {
+      // Volunteers can set high priority location markers
+      return [
+        'Medical Aid',
+        'Emergency', 
+        'Drinking Water',
+        'Security',
+        'Information',
+      ];
+    } else if (_userRole == 'Organizer') {
+      // Organizers can set all POI types
+      return POI.poiTypes;
+    }
+    
+    // Default: no POI creation allowed
+    return [];
   }
 
   Future<bool> _shouldShowShareButton() async {
@@ -1140,14 +1586,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               return const SizedBox.shrink();
             },
           ),
-          // POI placement button for organizers
-          if (_userRole == 'Organizer')
+          // POI placement button for organizers and volunteers
+          if (_userRole == 'Organizer' || _userRole == 'Volunteer')
             IconButton(
               icon: Icon(
                 _isPlacingPOI ? Icons.close : Icons.add_location,
                 color: _isPlacingPOI ? Colors.red : Colors.black,
               ),
-              tooltip: _isPlacingPOI ? 'Cancel POI Placement' : 'Add POI',
+              tooltip: _isPlacingPOI ? 'Cancel POI Placement' : 
+                (_userRole == 'Volunteer' ? 'Add Emergency POI' : 'Add POI'),
               onPressed: () {
                 setState(() {
                   _isPlacingPOI = !_isPlacingPOI;
@@ -1162,6 +1609,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 await FirebaseAuth.instance.signOut();
                 // Don't clear group data on logout - let users keep their group when they log back in
               } else if (value == 'leave_group') {
+                // Only allow attendees to leave groups
+                if (_userRole == 'Volunteer' || _userRole == 'Organizer') {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('${_userRole}s cannot leave their assigned group'),
+                      backgroundColor: Colors.orange,
+                      duration: const Duration(seconds: 3),
+                    ),
+                  );
+                  return;
+                }
+                
                 await UserPreferences.clearGroupData();
                 if (mounted) {
                   Navigator.pushReplacement(
@@ -1174,16 +1633,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               }
             },
             itemBuilder: (context) => [
-              const PopupMenuItem(
-                value: 'leave_group',
-                child: Row(
-                  children: [
-                    Icon(Icons.exit_to_app, color: Colors.black),
-                    SizedBox(width: 8),
-                    Text('Leave Group'),
-                  ],
+              // Only show leave group option for attendees
+              if (_userRole == 'Attendee')
+                const PopupMenuItem(
+                  value: 'leave_group',
+                  child: Row(
+                    children: [
+                      Icon(Icons.exit_to_app, color: Colors.black),
+                      SizedBox(width: 8),
+                      Text('Leave Group'),
+                    ],
+                  ),
                 ),
-              ),
               const PopupMenuItem(
                 value: 'logout',
                 child: Row(
@@ -1230,7 +1691,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   return;
                 }
                 
-                if (_isPlacingPOI && _userRole == 'Organizer') {
+                if (_isPlacingPOI && (_userRole == 'Organizer' || _userRole == 'Volunteer')) {
                   _showPOIPlacementDialog(point);
                   setState(() {
                     _isPlacingPOI = false;
@@ -1238,8 +1699,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 }
               },
               onLongPress: (tapPosition, point) {
-                // Allow organizers to place POIs with long press without activating placement mode
-                if (_userRole == 'Organizer') {
+                // Allow organizers and volunteers to place POIs with long press without activating placement mode
+                if (_userRole == 'Organizer' || _userRole == 'Volunteer') {
                   _showPOIPlacementDialog(point);
                 }
               },
@@ -1265,7 +1726,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   circles: [
                     CircleMarker(
                       point: LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!),
-                      radius: _isEmergency ? 12 : 6,
+                      radius: _isEmergency ? 
+                        _getZoomResponsiveIconSize(baseSize: 12, minSize: 8, maxSize: 16) : 
+                        _getZoomResponsiveIconSize(baseSize: 6, minSize: 4, maxSize: 10),
                       useRadiusInMeter: false,
                       color: _isEmergency ? Colors.red.withOpacity(0.2) : Colors.black.withOpacity(0.1),
                       borderColor: _isEmergency ? Colors.red : Colors.black,
@@ -1278,15 +1741,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   markers: [
                     Marker(
                       point: LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!),
-                      width: 30,
-                      height: 30,
+                      width: _getZoomResponsiveSize(baseSize: 30, minSize: 20, maxSize: 40),
+                      height: _getZoomResponsiveSize(baseSize: 30, minSize: 20, maxSize: 40),
                       child: Stack(
                         alignment: Alignment.center,
                         children: [
                           // Main location indicator
                           Icon(
                             Icons.circle,
-                            size: _isEmergency ? 12 : 8,
+                            size: _isEmergency ? 
+                              _getZoomResponsiveIconSize(baseSize: 12, minSize: 8, maxSize: 16) : 
+                              _getZoomResponsiveIconSize(baseSize: 8, minSize: 6, maxSize: 12),
                             color: _isEmergency ? Colors.red : Colors.black,
                           ),
                           // Emergency warning overlay
@@ -1295,17 +1760,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                               top: -2,
                               right: -2,
                               child: Container(
-                                width: 16,
-                                height: 16,
+                                width: _getZoomResponsiveIconSize(baseSize: 16, minSize: 12, maxSize: 20),
+                                height: _getZoomResponsiveIconSize(baseSize: 16, minSize: 12, maxSize: 20),
                                 decoration: BoxDecoration(
                                   color: Colors.red,
-                                  borderRadius: BorderRadius.circular(8),
+                                  borderRadius: BorderRadius.circular(_getZoomResponsiveIconSize(baseSize: 8, minSize: 6, maxSize: 10)),
                                   border: Border.all(color: Colors.white, width: 1),
                                 ),
-                                child: const Icon(
+                                child: Icon(
                                   Icons.warning,
                                   color: Colors.white,
-                                  size: 10,
+                                  size: _getZoomResponsiveIconSize(baseSize: 10, minSize: 8, maxSize: 14),
                                 ),
                               ),
                             ),
@@ -1317,14 +1782,18 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               MarkerClusterLayerWidget(
                 options: MarkerClusterLayerOptions(
                   maxClusterRadius: 40,
-                  size: const Size(35, 35),
+                  size: Size(_getZoomResponsiveSize(baseSize: 35, minSize: 25, maxSize: 45), 
+                            _getZoomResponsiveSize(baseSize: 35, minSize: 25, maxSize: 45)),
                   markers: _buildMarkers(), // Only group members and emergencies
                   centerMarkerOnClick: true,
                   zoomToBoundsOnClick: true,
                   builder: (context, markers) {
+                    final clusterSize = _getZoomResponsiveSize(baseSize: 35, minSize: 25, maxSize: 45);
+                    final fontSize = _getZoomResponsiveIconSize(baseSize: 12, minSize: 8, maxSize: 16);
+                    
                     return Container(
                       decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(17.5),
+                        borderRadius: BorderRadius.circular(clusterSize / 2),
                         color: Colors.white,
                         border: Border.all(
                           color: Colors.black45,
@@ -1334,10 +1803,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       child: Center(
                         child: Text(
                           markers.length.toString(),
-                          style: const TextStyle(
+                          style: TextStyle(
                             color: Colors.black,
                             fontWeight: FontWeight.w500,
-                            fontSize: 12,
+                            fontSize: fontSize,
                           ),
                         ),
                       ),
@@ -1382,11 +1851,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                           Icon(
                             Icons.group,
                             size: 16,
-                            color: Colors.green,
+                            color: AppColors.mapAttendee,
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            '${_groupMembers.length} active members visible',
+                            'Group members & location markers',
                             style: const TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w500,
@@ -1397,7 +1866,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       Padding(
                         padding: const EdgeInsets.only(left: 22),
                         child: Text(
-                          'Active in last 5 minutes',
+                          '${_groupMembers.where((m) => m.userRole == 'Attendee' || m.userRole == null).length} attendees visible',
                           style: TextStyle(
                             fontSize: 10,
                             color: Colors.grey[600],
@@ -1413,11 +1882,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                         _userRole == 'Volunteer' ? Icons.local_hospital :
                         Icons.admin_panel_settings,
                         size: 16,
-                        color: _userRole == 'Volunteer' ? Colors.red : Colors.purple,
+                        color: _userRole == 'Volunteer' ? AppColors.mapVolunteer : AppColors.mapOrganizer,
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        _userRole == 'Volunteer' ? 'Seeing all emergencies' : 'Can add POIs',
+                        _userRole == 'Volunteer' ? 'Can see emergencies & nearby staff' : 'Can see all volunteers & POIs',
                         style: const TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w500,
@@ -1438,10 +1907,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 FloatingActionButton(
                   heroTag: 'emergency',
                   onPressed: _toggleEmergency,
-                  backgroundColor: _isEmergency ? Colors.red : Colors.white,
+                  backgroundColor: _isEmergency ? AppColors.mapEmergency : AppColors.surface,
+                  elevation: 6,
                   child: Icon(
                     Icons.warning_rounded,
-                    color: _isEmergency ? Colors.white : Colors.black,
+                    color: _isEmergency ? AppColors.textOnPrimary : AppColors.mapEmergency,
+                    size: 28,
                   ),
                 ),
                 const SizedBox(height: 8),
@@ -1450,8 +1921,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   FloatingActionButton(
                     heroTag: 'nearest_member',
                     onPressed: _findNearestGroupMember,
-                    backgroundColor: Colors.blue,
-                    child: const Icon(Icons.people, color: Colors.white),
+                    backgroundColor: AppColors.mapGroupMembers,
+                    elevation: 6,
+                    child: Icon(Icons.people, color: AppColors.textOnPrimary, size: 24),
                   ),
                 if (_userRole == 'Attendee' && _groupMembers.length > 1)
                   const SizedBox(height: 8),
@@ -1466,8 +1938,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       0,
                     );
                   },
-                  backgroundColor: Colors.white,
-                  child: const Icon(Icons.my_location, color: Colors.black),
+                  backgroundColor: AppColors.mapUserLocation,
+                  elevation: 6,
+                  child: Icon(Icons.my_location, color: AppColors.textOnPrimary, size: 24),
                 ),
               ],
             ),
@@ -1478,7 +1951,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               left: 16,
               right: 16,
               child: Card(
-                color: Colors.white,
+                color: AppColors.surface,
+                elevation: 8,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(
+                    color: _selectedMember!.isEmergency 
+                        ? AppColors.mapEmergency 
+                        : AppColors.border,
+                    width: _selectedMember!.isEmergency ? 2 : 1,
+                  ),
+                ),
                 child: Padding(
                   padding: const EdgeInsets.all(16),
                   child: Column(
@@ -1492,10 +1975,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                                 ? Icons.emergency 
                                 : Icons.person,
                             color: _selectedMember!.isEmergency 
-                                ? Colors.red 
-                                : Colors.blue,
+                                ? AppColors.mapEmergency 
+                                : AppColors.mapGroupMembers,
+                            size: 24,
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 12),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1508,8 +1992,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                                     fontSize: 16,
                                     fontWeight: FontWeight.bold,
                                     color: _selectedMember!.isEmergency 
-                                        ? Colors.red 
-                                        : Colors.black,
+                                        ? AppColors.mapEmergency 
+                                        : AppColors.textPrimary,
                                   ),
                                 ),
                                 if (_routeInfo.isNotEmpty)
@@ -1517,20 +2001,23 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                                     _routeInfo,
                                     style: TextStyle(
                                       fontSize: 12,
-                                      color: Colors.grey[600],
+                                      color: AppColors.textSecondary,
                                     ),
                                   ),
                               ],
                             ),
                           ),
                           if (_isLoadingRoute)
-                            const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                            SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: AppColors.primary,
+                              ),
                             ),
                           IconButton(
-                            icon: const Icon(Icons.close),
+                            icon: Icon(Icons.close, color: AppColors.textSecondary),
                             onPressed: () => setState(() {
                               _selectedMember = null;
                               _currentRoute = [];
@@ -1618,7 +2105,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                                   ),
                                 ),
                                 Text(
-                                  _selectedPOI!.type,
+                                  _selectedPOI!.type.displayName,
                                   style: const TextStyle(
                                     fontSize: 14,
                                     color: Colors.grey,
@@ -1706,7 +2193,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               ),
             ),
           // POI placement instruction banner
-          if (_isPlacingPOI && _userRole == 'Organizer')
+          if (_isPlacingPOI && (_userRole == 'Organizer' || _userRole == 'Volunteer'))
             Positioned(
               bottom: 100,
               left: 16,
@@ -1753,79 +2240,114 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               bottom: 16,
               left: 16,
               child: Card(
-                color: Colors.white.withOpacity(0.9),
+                color: AppColors.mapLegendBackground,
+                elevation: 8,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(color: AppColors.border),
+                ),
                 child: Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(16),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
+                      Text(
                         'Map Legend',
                         style: TextStyle(
-                          fontSize: 12,
+                          fontSize: 14,
                           fontWeight: FontWeight.bold,
+                          color: AppColors.textPrimary,
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 12),
                       // Your location
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.person_pin_circle, color: Colors.blue, size: 16),
-                          const SizedBox(width: 4),
-                          const Text('You', style: TextStyle(fontSize: 10)),
+                          Icon(Icons.person_pin_circle, color: AppColors.mapUserLocation, size: 20),
+                          const SizedBox(width: 8),
+                          Text(
+                            'You', 
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
                         ],
                       ),
-                      const SizedBox(height: 4),
+                      const SizedBox(height: 8),
                       // Group members
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.person_pin, color: Colors.green, size: 16),
-                          const SizedBox(width: 4),
-                          const Text('Group Members', style: TextStyle(fontSize: 10)),
+                          Icon(Icons.person_pin, color: AppColors.mapGroupMembers, size: 20),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Group Members', 
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
                         ],
                       ),
                       if (_userRole == 'Volunteer') ...[
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 8),
                         // Emergencies
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Container(
-                              width: 16,
-                              height: 16,
+                              width: 20,
+                              height: 20,
                               decoration: BoxDecoration(
-                                color: Colors.red,
-                                borderRadius: BorderRadius.circular(8),
+                                color: AppColors.mapEmergency,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: Colors.white, width: 2),
                               ),
-                              child: const Icon(Icons.emergency, color: Colors.white, size: 10),
+                              child: const Icon(Icons.emergency, color: Colors.white, size: 12),
                             ),
-                            const SizedBox(width: 4),
-                            const Text('Emergencies', style: TextStyle(fontSize: 10)),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Emergencies', 
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
                           ],
                         ),
                       ],
-                      const SizedBox(height: 4),
+                      const SizedBox(height: 8),
                       // POIs
                       Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Container(
-                            width: 16,
-                            height: 16,
+                            width: 20,
+                            height: 20,
                             decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.blue, width: 1),
+                              color: AppColors.surface,
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(color: AppColors.mapPOI, width: 2),
                             ),
                             child: const Center(
-                              child: Text('🏥', style: TextStyle(fontSize: 8)),
+                              child: Text('🏥', style: TextStyle(fontSize: 10)),
                             ),
                           ),
-                          const SizedBox(width: 4),
-                          const Text('Points of Interest', style: TextStyle(fontSize: 10)),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Points of Interest', 
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textPrimary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
                         ],
                       ),
                     ],

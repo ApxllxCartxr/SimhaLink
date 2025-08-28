@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../services/auth_service.dart';
+import '../config/app_colors.dart';
 
 class GroupChatScreen extends StatefulWidget {
   final String groupId;
@@ -21,9 +23,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: AppColors.backgroundLight,
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
+        backgroundColor: AppColors.primary,
+        foregroundColor: AppColors.textOnPrimary,
         title: const Text('Group Chat'),
         elevation: 0,
       ),
@@ -66,24 +69,33 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         margin: const EdgeInsets.only(bottom: 8),
                         padding: const EdgeInsets.all(12),
                         decoration: BoxDecoration(
-                          color: isCurrentUser ? Colors.black : Colors.black12,
-                          borderRadius: BorderRadius.circular(12),
+                          color: isCurrentUser ? AppColors.chatBubbleUser : AppColors.chatBubbleOther,
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.shadow,
+                              blurRadius: 4,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
                         ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              message['userName'] ?? 'Unknown User',
+                              message['userName'] ?? AuthService.getUserDisplayName(FirebaseAuth.instance.currentUser),
                               style: TextStyle(
-                                color: isCurrentUser ? Colors.white70 : Colors.black54,
+                                color: isCurrentUser ? AppColors.textOnPrimary.withOpacity(0.8) : AppColors.textSecondary,
                                 fontSize: 12,
+                                fontWeight: FontWeight.w500,
                               ),
                             ),
                             const SizedBox(height: 4),
                             Text(
                               message['text'],
                               style: TextStyle(
-                                color: isCurrentUser ? Colors.white : Colors.black,
+                                color: isCurrentUser ? AppColors.chatTextUser : AppColors.chatTextOther,
+                                fontSize: 14,
                               ),
                             ),
                           ],
@@ -96,25 +108,52 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             ),
           ),
           Container(
-            padding: const EdgeInsets.all(8),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              border: Border(top: BorderSide(color: Colors.black12)),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              border: Border(top: BorderSide(color: AppColors.divider)),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.shadow,
+                  blurRadius: 8,
+                  offset: const Offset(0, -2),
+                ),
+              ],
             ),
             child: Row(
               children: [
                 Expanded(
-                  child: TextField(
-                    controller: _messageController,
-                    decoration: const InputDecoration(
-                      hintText: 'Type a message...',
-                      border: InputBorder.none,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: AppColors.backgroundLight,
+                      borderRadius: BorderRadius.circular(24),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: TextField(
+                      controller: _messageController,
+                      decoration: InputDecoration(
+                        hintText: 'Type a message...',
+                        hintStyle: TextStyle(color: AppColors.textHint),
+                        border: InputBorder.none,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 12,
+                        ),
+                      ),
                     ),
                   ),
                 ),
-                IconButton(
-                  icon: const Icon(Icons.send),
-                  onPressed: _sendMessage,
+                const SizedBox(width: 8),
+                Container(
+                  decoration: BoxDecoration(
+                    color: AppColors.primary,
+                    shape: BoxShape.circle,
+                  ),
+                  child: IconButton(
+                    icon: const Icon(Icons.send),
+                    color: AppColors.textOnPrimary,
+                    onPressed: _sendMessage,
+                  ),
                 ),
               ],
             ),
@@ -137,7 +176,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         .add({
       'text': _messageController.text.trim(),
       'userId': user.uid,
-      'userName': user.displayName ?? 'Unknown User',
+      'userName': AuthService.getUserDisplayName(user),
       'timestamp': FieldValue.serverTimestamp(),
     });
 

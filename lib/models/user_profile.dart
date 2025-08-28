@@ -1,10 +1,47 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+/// Enumeration of user roles in the SimhaLink app
+enum UserRole {
+  volunteer('Volunteer'),
+  vip('VIP'), 
+  organizer('Organizer'),
+  participant('Participant');
+
+  const UserRole(this.displayName);
+  final String displayName;
+
+  /// Get UserRole from string
+  static UserRole fromString(String role) {
+    switch (role.toLowerCase()) {
+      case 'volunteer':
+        return UserRole.volunteer;
+      case 'vip':
+        return UserRole.vip;
+      case 'organizer':
+        return UserRole.organizer;
+      case 'participant':
+      default:
+        return UserRole.participant;
+    }
+  }
+
+  /// Check if this role has elevated permissions
+  bool get hasElevatedPermissions => 
+      this == UserRole.organizer || this == UserRole.volunteer;
+
+  /// Check if this role can manage alerts
+  bool get canManageAlerts => 
+      this == UserRole.organizer || this == UserRole.volunteer;
+
+  /// Check if this role can access VIP features
+  bool get hasVipAccess => this == UserRole.vip || this == UserRole.organizer;
+}
+
 class UserProfile {
   final String uid;
   final String displayName;
   final String email;
-  final String role;
+  final UserRole role;
   final String? photoURL;
   final String? phoneNumber;
   final DateTime createdAt;
@@ -30,7 +67,7 @@ class UserProfile {
       uid: map['uid'] ?? '',
       displayName: map['displayName'] ?? '',
       email: map['email'] ?? '',
-      role: map['role'] ?? 'Attendee',
+      role: UserRole.fromString(map['role'] ?? 'participant'),
       photoURL: map['photoURL'],
       phoneNumber: map['phoneNumber'],
       createdAt: (map['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
@@ -45,7 +82,7 @@ class UserProfile {
       'uid': uid,
       'displayName': displayName,
       'email': email,
-      'role': role,
+      'role': role.name,
       'photoURL': photoURL,
       'phoneNumber': phoneNumber,
       'createdAt': Timestamp.fromDate(createdAt),
@@ -59,7 +96,7 @@ class UserProfile {
     String? uid,
     String? displayName,
     String? email,
-    String? role,
+    UserRole? role,
     String? photoURL,
     String? phoneNumber,
     DateTime? createdAt,

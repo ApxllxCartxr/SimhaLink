@@ -57,8 +57,6 @@ class AuthWrapper extends StatelessWidget {
 
   Future<String?> _checkUserGroupAndRole(User user) async {
     try {
-      print('🔍 Checking user group and role for: ${user.email}');
-      
       // Add retry logic for new users - sometimes Firestore write hasn't completed
       DocumentSnapshot? userDoc;
       int retryCount = 0;
@@ -71,13 +69,11 @@ class AuthWrapper extends StatelessWidget {
             .get();
             
         if (userDoc.exists) {
-          print('✅ User document found on attempt ${retryCount + 1}');
           break;
         }
         
         retryCount++;
         if (retryCount < maxRetries) {
-          print('⏳ User document not found, retrying... ($retryCount/$maxRetries)');
           await Future.delayed(Duration(milliseconds: 500 * retryCount));
         }
       }
@@ -85,65 +81,60 @@ class AuthWrapper extends StatelessWidget {
       if (userDoc != null && userDoc.exists) {
         final userData = userDoc.data() as Map<String, dynamic>;
         final userRole = userData['role'] as String?;
-        print('👤 User role found: $userRole');
 
         // Handle different roles with specific logic
         if (userRole == 'Volunteer') {
-          print('🚨 Volunteer detected - assigning to volunteers group');
           final groupId = await _ensureSpecialGroupExists('volunteers', 'Volunteers');
           await UserPreferences.setUserGroupId(groupId);
           await _addUserToGroup(groupId, user.uid);
           return groupId;
         } else if (userRole == 'Organizer') {
-          print('👨‍💼 Organizer detected - assigning to organizers group');
           final groupId = await _ensureSpecialGroupExists('organizers', 'Organizers');
           await UserPreferences.setUserGroupId(groupId);
           await _addUserToGroup(groupId, user.uid);
           return groupId;
         } else if (userRole == 'Attendee') {
-          print('🎫 Attendee detected - checking for existing group');
-          
           // Check if attendee has a saved group preference
           final savedGroupId = await UserPreferences.getUserGroupId();
-          print('💾 Saved group ID: $savedGroupId');
           
           if (savedGroupId != null && savedGroupId.isNotEmpty) {
-            // Verify the group still exists and user is a member
-            final groupDoc = await FirebaseFirestore.instance
-                .collection('groups')
-                .doc(savedGroupId)
-                .get();
-            if (groupDoc.exists) {
-              final groupData = groupDoc.data() as Map<String, dynamic>;
-              final memberIds = List<String>.from(groupData['memberIds'] ?? []);
+            // For attendees, always try to repair group membership instead of clearing
+            try {
+              final groupDoc = await FirebaseFirestore.instance
+                  .collection('groups')
+                  .doc(savedGroupId)
+                  .get();
               
-              if (memberIds.contains(user.uid)) {
-                print('✅ User is member of existing group, going to map');
+              if (groupDoc.exists) {
+                final groupData = groupDoc.data() as Map<String, dynamic>;
+                final memberIds = List<String>.from(groupData['memberIds'] ?? []);
+                
+                if (!memberIds.contains(user.uid)) {
+                  // Re-add user to the group instead of clearing
+                  await _addUserToGroup(savedGroupId, user.uid);
+                }
                 return savedGroupId;
               } else {
-                print('❌ User not a member of saved group, clearing preference');
+                // Only clear if group is completely deleted
                 await UserPreferences.clearGroupData();
               }
-            } else {
-              print('❌ Saved group no longer exists, clearing preference');
-              await UserPreferences.clearGroupData();
+            } catch (e) {
+              // On any error, try to maintain the group connection
+              return savedGroupId;
             }
           }
           
           // Attendee has no valid group, show group creation screen
-          print('🏗️ NEW ATTENDEE - Showing group creation screen');
           return null;
         }
-      } else {
-        print('❓ No user document found in Firestore after retries - treating as new user');
       }
 
-      // User has no role document or unknown role, show group creation screen
-      print('🏗️ Fallback - Showing group creation screen');
+      // User has no role document, show group creation screen
       return null;
     } catch (e) {
-      print('❌ Error checking user group and role: $e');
-      return null; // Show group creation screen on error
+      // On error, try to recover saved group instead of clearing
+      final savedGroupId = await UserPreferences.getUserGroupId();
+      return savedGroupId; // Return saved group or null if none exists
     }
   }
 
@@ -168,14 +159,40 @@ class AuthWrapper extends StatelessWidget {
 
   Future<void> _addUserToGroup(String groupId, String userId) async {
     try {
-      await FirebaseFirestore.instance
+      // Check if user is already a member to avoid unnecessary updates
+      final groupDoc = await FirebaseFirestore.instance
           .collection('groups')
           .doc(groupId)
-          .update({
-        'memberIds': FieldValue.arrayUnion([userId])
-      });
+          .get();
+          
+      if (groupDoc.exists) {
+        final groupData = groupDoc.data() as Map<String, dynamic>;
+        final memberIds = List<String>.from(groupData['memberIds'] ?? []);
+        
+        // Only add if not already a member
+        if (!memberIds.contains(userId)) {
+          await FirebaseFirestore.instance
+              .collection('groups')
+              .doc(groupId)
+              .update({
+            'memberIds': FieldValue.arrayUnion([userId])
+          });
+        }
+      }
     } catch (e) {
-      print('Error adding user to group: $e');
+      // If the group doesn't exist, create it (for special groups)
+      if (groupId == 'volunteers' || groupId == 'organizers') {
+        await _ensureSpecialGroupExists(groupId, groupId == 'volunteers' ? 'Volunteers' : 'Organizers');
+        // Retry adding user
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .update({
+          'memberIds': FieldValue.arrayUnion([userId])
+        });
+      } else {
+        print('Error adding user to group: $e');
+      }
     }
   }
 }

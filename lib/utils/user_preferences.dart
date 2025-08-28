@@ -22,6 +22,31 @@ class UserPreferences {
   }
 
   static Future<void> clearGroupData() async {
+    // Check if user is a volunteer or organizer before clearing
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      try {
+        final userDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .get();
+            
+        if (userDoc.exists) {
+          final userData = userDoc.data() as Map<String, dynamic>;
+          final userRole = userData['role'] as String?;
+          
+          // Prevent volunteers and organizers from clearing their group data
+          if (userRole == 'Volunteer' || userRole == 'Organizer') {
+            debugPrint('⛔ Prevented ${userRole} from clearing group data');
+            return; // Don't clear group data for special roles
+          }
+        }
+      } catch (e) {
+        debugPrint('Error checking user role before clearing group data: $e');
+      }
+    }
+    
+    // Only clear for attendees or unknown roles
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_userGroupIdKey);
   }

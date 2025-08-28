@@ -119,6 +119,30 @@ class Validators {
     return null;
   }
 
+  /// Validates full name
+  static String? validateName(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Name is required';
+    }
+    
+    final trimmedValue = value.trim();
+    
+    if (trimmedValue.length < 2) {
+      return 'Name must be at least 2 characters';
+    }
+    
+    if (trimmedValue.length > 50) {
+      return 'Name must be less than 50 characters';
+    }
+    
+    // Check if name contains only letters, spaces, hyphens, and apostrophes
+    if (!RegExp(r"^[a-zA-Z\s\-']+$").hasMatch(trimmedValue)) {
+      return 'Name can only contain letters, spaces, hyphens, and apostrophes';
+    }
+    
+    return null;
+  }
+
   /// Validates display name
   static String? validateDisplayName(String? value) {
     if (value == null || value.trim().isEmpty) {
