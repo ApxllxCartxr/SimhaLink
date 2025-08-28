@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "672973153766",
+    "project_id": "simhalink-f5ddd",
+    "storage_bucket": "simhalink-f5ddd.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:672973153766:android:883ab0d7dc9ef86f902227",
+        "android_client_info": {
+          "package_name": "com.example.simha_link"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDH3u2Qexennl7fABNRi0l9YY804GHRrAY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
