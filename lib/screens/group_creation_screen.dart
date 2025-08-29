@@ -56,6 +56,15 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
       // Set this as the user's current group
       await UserPreferences.setUserGroupId(groupId);
 
+      // Update user document to ensure they can join/create groups
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({
+        'canJoinGroups': true,
+        'lastCreatedGroup': FieldValue.serverTimestamp(),
+      });
+
       if (mounted) {
         // Show join code dialog before navigating to map
         _showJoinCodeDialog(_groupNameController.text.trim(), joinCode, groupId);
@@ -102,17 +111,35 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
 
       final groupDoc = querySnapshot.docs.first;
       final groupId = groupDoc.id;
+      final groupData = groupDoc.data() as Map<String, dynamic>;
 
-      // Add user to the group
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(groupId)
-          .update({
-        'memberIds': FieldValue.arrayUnion([user.uid])
-      });
+      // Check if user is already in the group
+      final memberIds = List<String>.from(groupData['memberIds'] ?? []);
+      
+      if (memberIds.contains(user.uid)) {
+        // User is already in this group, just set it as active
+        await UserPreferences.setUserGroupId(groupId);
+      } else {
+        // Add user to the group
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .update({
+          'memberIds': FieldValue.arrayUnion([user.uid])
+        });
 
-      // Set this as the user's current group
-      await UserPreferences.setUserGroupId(groupId);
+        // Set this as the user's current group
+        await UserPreferences.setUserGroupId(groupId);
+
+        // Update user document to mark they can join groups (clear any restrictions)
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .update({
+          'canJoinGroups': true,
+          'lastJoinedGroup': FieldValue.serverTimestamp(),
+        });
+      }
 
       if (mounted) {
         Navigator.pushReplacement(

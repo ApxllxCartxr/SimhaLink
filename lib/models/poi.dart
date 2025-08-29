@@ -1,3 +1,5 @@
+import 'package:flutter/material.dart';
+
 /// Enumeration of Point of Interest marker types
 enum MarkerType {
   medical('Medical Aid', 'medical'),
@@ -14,6 +16,32 @@ enum MarkerType {
   const MarkerType(this.displayName, this.iconName);
   final String displayName;
   final String iconName;
+
+  /// Get Material Design IconData for each POI type
+  IconData get iconData {
+    switch (this) {
+      case MarkerType.medical:
+        return Icons.local_hospital;
+      case MarkerType.drinkingWater:
+        return Icons.water_drop;
+      case MarkerType.emergency:
+        return Icons.emergency;
+      case MarkerType.accessibility:
+        return Icons.accessibility;
+      case MarkerType.historical:
+        return Icons.museum;
+      case MarkerType.restroom:
+        return Icons.wc;
+      case MarkerType.food:
+        return Icons.restaurant;
+      case MarkerType.parking:
+        return Icons.local_parking;
+      case MarkerType.security:
+        return Icons.security;
+      case MarkerType.information:
+        return Icons.info;
+    }
+  }
 
   static MarkerType fromString(String type) {
     switch (type.toLowerCase()) {

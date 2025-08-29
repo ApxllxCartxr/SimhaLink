@@ -6,60 +6,97 @@ import 'package:simha_link/screens/map_screen.dart';
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/widgets/loading_widgets.dart';
+import 'dart:async';
 
-class AuthWrapper extends StatelessWidget {
-  const AuthWrapper({super.key});
+class ImprovedAuthWrapper extends StatefulWidget {
+  const ImprovedAuthWrapper({super.key});
+
+  @override
+  State<ImprovedAuthWrapper> createState() => _ImprovedAuthWrapperState();
+}
+
+class _ImprovedAuthWrapperState extends State<ImprovedAuthWrapper> {
+  StreamSubscription<User?>? _authSubscription;
+  User? _currentUser;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _initAuthListener();
+  }
+
+  void _initAuthListener() {
+    _authSubscription = FirebaseAuth.instance.authStateChanges().listen(
+      (User? user) {
+        debugPrint('🔄 ImprovedAuthWrapper: Auth state changed - ${user?.uid ?? 'null'}');
+        if (mounted) {
+          setState(() {
+            _currentUser = user;
+            _isLoading = false;
+          });
+        }
+      },
+      onError: (error) {
+        debugPrint('❌ ImprovedAuthWrapper: Auth stream error - $error');
+        if (mounted) {
+          setState(() {
+            _currentUser = null;
+            _isLoading = false;
+          });
+        }
+      },
+    );
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<User?>(
-      stream: FirebaseAuth.instance.authStateChanges(),
-      builder: (context, snapshot) {
-        // Debug auth state changes
-        debugPrint('🔄 AuthWrapper: Auth state changed - ${snapshot.data?.uid ?? 'null'}');
-        
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: LoadingWidget(
-              message: 'Checking authentication...',
-            ),
-          );
-        }
-        
-        if (snapshot.hasData && snapshot.data != null) {
-          // User is authenticated, check if they have a group
-          debugPrint('👤 AuthWrapper: User authenticated, checking group...');
-          return FutureBuilder<String?>(
-            future: _checkUserGroupAndRole(snapshot.data!),
-            builder: (context, groupSnapshot) {
-              if (groupSnapshot.connectionState == ConnectionState.waiting) {
-                return const Scaffold(
-                  body: LoadingWidget(
-                    message: 'Loading your group...',
-                  ),
-                );
-              }
-              
-              final groupId = groupSnapshot.data;
-              
-              // If user has no group, show group creation screen
-              if (groupId == null) {
-                debugPrint('🎯 AuthWrapper: No group found, showing group creation');
-                return const GroupCreationScreen();
-              }
-              
-              // User has a group, show map screen
-              debugPrint('🗺️ AuthWrapper: Group found ($groupId), showing map');
-              return MapScreen(groupId: groupId);
-            },
-          );
-        }
-        
-        // User is not authenticated, show auth screen
-        debugPrint('🚪 AuthWrapper: User not authenticated, showing auth screen');
-        return const AuthScreen();
-      },
-    );
+    if (_isLoading) {
+      return const Scaffold(
+        body: LoadingWidget(
+          message: 'Checking authentication...',
+        ),
+      );
+    }
+
+    if (_currentUser != null) {
+      // User is authenticated, check if they have a group
+      debugPrint('👤 ImprovedAuthWrapper: User authenticated, checking group...');
+      return FutureBuilder<String?>(
+        future: _checkUserGroupAndRole(_currentUser!),
+        builder: (context, groupSnapshot) {
+          if (groupSnapshot.connectionState == ConnectionState.waiting) {
+            return const Scaffold(
+              body: LoadingWidget(
+                message: 'Loading your group...',
+              ),
+            );
+          }
+          
+          final groupId = groupSnapshot.data;
+          
+          // If user has no group, show group creation screen
+          if (groupId == null) {
+            debugPrint('🎯 ImprovedAuthWrapper: No group found, showing group creation');
+            return const GroupCreationScreen();
+          }
+          
+          // User has a group, show map screen
+          debugPrint('🗺️ ImprovedAuthWrapper: Group found ($groupId), showing map');
+          return MapScreen(groupId: groupId);
+        },
+      );
+    }
+    
+    // User is not authenticated, show auth screen
+    debugPrint('🚪 ImprovedAuthWrapper: User not authenticated, showing auth screen');
+    return const AuthScreen();
   }
 
   Future<String?> _checkUserGroupAndRole(User user) async {
@@ -89,46 +126,19 @@ class AuthWrapper extends StatelessWidget {
         final userData = userDoc.data() as Map<String, dynamic>;
         final userRole = userData['role'] as String?;
 
-        debugPrint('🔍 AuthWrapper: User ${user.uid} has role: $userRole');
-
-        // IMPORTANT: Clear any local group preferences that don't match the user's role
-        // This prevents cross-user group contamination
-        final currentLocalGroupId = await UserPreferences.getUserGroupId();
-        debugPrint('📱 AuthWrapper: Local group ID: $currentLocalGroupId');
-
         // Handle different roles with specific logic
         if (userRole == 'Volunteer') {
-          final correctGroupId = 'volunteers';
-          // If local group doesn't match role, clear it
-          if (currentLocalGroupId != null && currentLocalGroupId != correctGroupId) {
-            debugPrint('🔄 AuthWrapper: Clearing incorrect local group for Volunteer');
-            await UserPreferences.clearGroupData();
-          }
-          
           final groupId = await _ensureSpecialGroupExists('volunteers', 'Volunteers');
           await UserPreferences.setUserGroupId(groupId);
           await _addUserToGroup(groupId, user.uid);
           return groupId;
         } else if (userRole == 'Organizer') {
-          final correctGroupId = 'organizers';
-          // If local group doesn't match role, clear it
-          if (currentLocalGroupId != null && currentLocalGroupId != correctGroupId) {
-            debugPrint('🔄 AuthWrapper: Clearing incorrect local group for Organizer');
-            await UserPreferences.clearGroupData();
-          }
-          
           final groupId = await _ensureSpecialGroupExists('organizers', 'Organizers');
+          await UserPreferences.setUserGroupId(groupId);
           await _addUserToGroup(groupId, user.uid);
           return groupId;
         } else if (userRole == 'Attendee') {
-          // For attendees, validate that any local group assignment is appropriate
-          // If they have a volunteer/organizer group cached, clear it
-          if (currentLocalGroupId == 'volunteers' || currentLocalGroupId == 'organizers') {
-            debugPrint('🔄 AuthWrapper: Clearing special role group for Attendee');
-            await UserPreferences.clearGroupData();
-          }
-          
-          // Check if attendee has a valid saved group preference
+          // Check if attendee has a saved group preference
           final savedGroupId = await UserPreferences.getUserGroupId();
           
           if (savedGroupId != null && savedGroupId.isNotEmpty) {
@@ -172,42 +182,9 @@ class AuthWrapper extends StatelessWidget {
       // User has no role document, show group creation screen
       return null;
     } catch (e) {
-      debugPrint('Error in _checkUserGroupAndRole: $e');
       // On error, try to recover saved group instead of clearing
       final savedGroupId = await UserPreferences.getUserGroupId();
       return savedGroupId; // Return saved group or null if none exists
-    }
-  }
-
-  /// Validate that user's local group matches their Firebase role and group membership
-  Future<bool> _validateGroupConsistency(User user, String? localGroupId) async {
-    if (localGroupId == null) return true; // No local group is always valid
-    
-    try {
-      // Check if user is actually in the group in Firebase
-      final groupDoc = await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(localGroupId)
-          .get();
-      
-      if (!groupDoc.exists) {
-        debugPrint('⚠️ Local group $localGroupId does not exist in Firebase');
-        return false;
-      }
-      
-      final groupData = groupDoc.data() as Map<String, dynamic>;
-      final memberIds = List<String>.from(groupData['memberIds'] ?? []);
-      
-      if (!memberIds.contains(user.uid)) {
-        debugPrint('⚠️ User ${user.uid} not found in group $localGroupId members');
-        return false;
-      }
-      
-      debugPrint('✅ Group consistency validated for user ${user.uid}');
-      return true;
-    } catch (e) {
-      debugPrint('Error validating group consistency: $e');
-      return false; // Assume invalid on error
     }
   }
 
@@ -250,9 +227,6 @@ class AuthWrapper extends StatelessWidget {
               .update({
             'memberIds': FieldValue.arrayUnion([userId])
           });
-          debugPrint('👤 Added user $userId to group $groupId');
-        } else {
-          debugPrint('👤 User $userId already in group $groupId');
         }
       }
     } catch (e) {
@@ -266,30 +240,9 @@ class AuthWrapper extends StatelessWidget {
             .update({
           'memberIds': FieldValue.arrayUnion([userId])
         });
-        debugPrint('👤 Added user $userId to newly created group $groupId');
       } else {
-        debugPrint('❌ Error adding user to group: $e');
+        print('Error adding user to group: $e');
       }
-    }
-  }
-
-  /// Remove user from a group and cleanup if empty
-  Future<void> _removeUserFromGroup(String groupId, String userId) async {
-    try {
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(groupId)
-          .update({
-        'memberIds': FieldValue.arrayRemove([userId])
-      });
-      
-      debugPrint('👤 Removed user $userId from group $groupId');
-      
-      // Cleanup empty group
-      await UserPreferences.cleanupEmptyGroup(groupId);
-      
-    } catch (e) {
-      debugPrint('❌ Error removing user from group: $e');
     }
   }
 }

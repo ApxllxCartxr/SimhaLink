@@ -11,6 +11,9 @@ class AuthService {
   final GoogleSignIn _googleSignIn = GoogleSignIn();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
+  // Track logout state to prevent multiple calls
+  bool _isSigningOut = false;
+
   // Stream of authentication state changes
   Stream<User?> get authStateChanges => _auth.authStateChanges();
   
@@ -105,13 +108,38 @@ class AuthService {
 
   /// Sign out
   Future<void> signOut() async {
+    if (_isSigningOut) {
+      print('⚠️ Sign out already in progress, skipping...');
+      return; // Prevent multiple logout calls
+    }
+    
     try {
+      _isSigningOut = true;
+      print('🚪 Starting sign out process...');
+      
+      // Get current user before signing out
+      final currentUserId = _auth.currentUser?.uid;
+      
+      // IMPORTANT: Do NOT clear user preferences on logout
+      // User should return to same group when they log back in
+      print('💾 Preserving group data for user: $currentUserId (logout, not leave group)');
+      
       await Future.wait([
         _auth.signOut(),
         _googleSignIn.signOut(),
       ]);
+      
+      print('✅ Sign out successful - Firebase auth cleared, group data preserved');
+      
+      // Add a small delay to ensure auth state propagates
+      await Future.delayed(const Duration(milliseconds: 100));
+      
     } catch (e) {
+      print('❌ Sign out failed: $e');
       throw Exception('Sign out failed: $e');
+    } finally {
+      _isSigningOut = false;
+      print('🔄 Sign out process completed');
     }
   }
 

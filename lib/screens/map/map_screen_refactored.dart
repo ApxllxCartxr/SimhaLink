@@ -16,13 +16,13 @@ import 'package:simha_link/services/routing_service.dart';
 import 'package:simha_link/config/app_colors.dart';
 
 // Import the new managers and widgets
-import 'map/managers/location_manager.dart';
-import 'map/managers/emergency_manager.dart';
-import 'map/managers/marker_manager.dart';
-import 'map/widgets/map_info_panel.dart';
-import 'map/widgets/map_legend.dart';
-import 'map/widgets/emergency_dialog.dart';
-import 'map/widgets/marker_action_bottom_sheet.dart';
+import 'managers/location_manager.dart';
+import 'managers/emergency_manager.dart';
+import 'managers/marker_manager.dart';
+import 'widgets/map_info_panel.dart';
+import 'widgets/map_legend.dart';
+import 'widgets/emergency_dialog.dart';
+import 'widgets/marker_action_bottom_sheet.dart';
 
 class MapScreen extends StatefulWidget {
   final String groupId;
@@ -306,23 +306,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
   }
 
-  void _showMarkerActionBottomSheet(POI poi) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => MarkerActionBottomSheet(
-        poi: poi,
-        userRole: _userRole ?? 'Attendee',
-        onClose: () => Navigator.of(context).pop(),
-        onMarkerUpdated: () {
-          // Refresh happens automatically via stream
-          Navigator.of(context).pop();
-        },
-      ),
-    );
-  }
-
   void _showMarkerInfoDialog(POI poi) {
     showDialog(
       context: context,
@@ -380,6 +363,23 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             child: const Text('Get Directions'),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showMarkerActionBottomSheet(POI poi) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => MarkerActionBottomSheet(
+        poi: poi,
+        userRole: _userRole ?? 'Attendee',
+        onClose: () => Navigator.of(context).pop(),
+        onMarkerUpdated: () {
+          // Refresh happens automatically via stream
+          Navigator.of(context).pop();
+        },
       ),
     );
   }
@@ -499,147 +499,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     return earthRadius * c;
   }
 
-  /// Start POI placement mode (Organizers only)
-  void _startPOIPlacement() {
-    if (_userRole != 'Organizer') return;
-    
-    setState(() {
-      _isPlacingPOI = true;
-    });
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Tap on the map to place a POI'),
-        duration: Duration(seconds: 3),
-      ),
-    );
-  }
-
-  /// Show POI creation dialog
-  void _showPOICreationDialog(LatLng position) {
-    String poiName = '';
-    String poiDescription = '';
-    MarkerType selectedType = MarkerType.information;
-
-    showDialog(
-      context: context,
-      builder: (BuildContext dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Create Point of Interest'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  decoration: const InputDecoration(
-                    labelText: 'POI Name',
-                    border: OutlineInputBorder(),
-                  ),
-                  onChanged: (value) => poiName = value,
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  decoration: const InputDecoration(
-                    labelText: 'Description',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 2,
-                  onChanged: (value) => poiDescription = value,
-                ),
-                const SizedBox(height: 16),
-                DropdownButtonFormField<MarkerType>(
-                  value: selectedType,
-                  decoration: const InputDecoration(
-                    labelText: 'POI Type',
-                    border: OutlineInputBorder(),
-                  ),
-                  items: MarkerType.values.map((type) {
-                    return DropdownMenuItem(
-                      value: type,
-                      child: Row(
-                        children: [
-                          Icon(type.iconData, size: 20),
-                          const SizedBox(width: 8),
-                          Text(type.displayName),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                  onChanged: (MarkerType? newType) {
-                    if (newType != null) {
-                      setDialogState(() => selectedType = newType);
-                    }
-                  },
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                setState(() => _isPlacingPOI = false);
-                Navigator.of(dialogContext).pop();
-              },
-              child: const Text('Cancel'),
-            ),
-            ElevatedButton(
-              onPressed: () async {
-                if (poiName.trim().isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Please enter a POI name')),
-                  );
-                  return;
-                }
-                
-                Navigator.of(dialogContext).pop();
-                await _createPOI(position, poiName.trim(), poiDescription.trim(), selectedType);
-                setState(() => _isPlacingPOI = false);
-              },
-              child: const Text('Create'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Create POI in Firestore
-  Future<void> _createPOI(LatLng position, String name, String description, MarkerType type) async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      final poi = POI(
-        id: DateTime.now().millisecondsSinceEpoch.toString(),
-        name: name,
-        type: type,
-        latitude: position.latitude,
-        longitude: position.longitude,
-        description: description,
-        createdBy: user.uid,
-        createdAt: DateTime.now(),
-      );
-
-      await FirebaseFirestore.instance
-          .collection('pois')
-          .doc(poi.id)
-          .set(poi.toMap());
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${type.displayName} created successfully')),
-        );
-      }
-    } catch (e) {
-      debugPrint('Error creating POI: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error creating POI: $e')),
-        );
-      }
-    }
-  }
-
   @override
   void dispose() {
     _groupLocationsSubscription?.cancel();
@@ -677,11 +536,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 _getCurrentLocation();
               },
               onTap: (tapPosition, point) {
-                if (_isPlacingPOI && _userRole == 'Organizer') {
-                  // Handle POI placement
-                  _showPOICreationDialog(point);
-                } else if (_selectedMember != null || _selectedPOI != null) {
-                  // Clear selections
+                if (_selectedMember != null || _selectedPOI != null) {
                   setState(() {
                     _selectedMember = null;
                     _selectedPOI = null;
@@ -715,12 +570,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                         _locationManager.currentLocation!.latitude!,
                         _locationManager.currentLocation!.longitude!
                       ),
-                      radius: _locationManager.currentLocation!.accuracy ?? 50.0, // Use GPS accuracy or 50m default
-                      useRadiusInMeter: true, // Geographic scaling - radius in real-world meters
-                      color: _isEmergency 
-                          ? AppColors.mapEmergency.withOpacity(0.15)
-                          : AppColors.mapCurrentUser.withOpacity(0.2),
-                      borderColor: _isEmergency ? AppColors.mapEmergency : AppColors.mapCurrentUser,
+                      radius: 50,
+                      color: AppColors.mapCurrentUser.withOpacity(0.2),
+                      borderColor: AppColors.mapCurrentUser,
                       borderStrokeWidth: 2,
                     ),
                   ],
@@ -805,16 +657,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // POI Creation button (Organizers only)
-                if (_userRole == 'Organizer' && !_isPlacingPOI) ...[
-                  FloatingActionButton(
-                    heroTag: "addPOI",
-                    onPressed: _startPOIPlacement,
-                    backgroundColor: AppColors.secondary,
-                    child: const Icon(Icons.add_location, size: 24),
-                  ),
-                  const SizedBox(height: 8),
-                  // Marker management button
+                // Marker management button (organizers only)
+                if (_userRole == 'Organizer') ...[
                   FloatingActionButton(
                     heroTag: "marker_management",
                     onPressed: _toggleMarkerManagement,
@@ -827,7 +671,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   ),
                   const SizedBox(height: 8),
                 ],
-                
                 // Emergency button
                 FloatingActionButton(
                   heroTag: "emergency",
@@ -863,7 +706,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   _userRole == 'Attendee' ? 'Tap markers for directions' : 
                   _userRole == 'Volunteer' ? 'Monitor emergencies & assist' :
                   _userRole == 'Organizer' ? 
-                    (_isMarkerManagementMode ? 'Tap markers to manage them' : 'Long-press markers to manage them') : 
+                    (_isMarkerManagementMode ? 'Tap markers to manage them' : 'Use edit button to manage markers') : 
                   'Map view',
                   style: TextStyle(
                     fontSize: 12,
