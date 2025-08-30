@@ -175,14 +175,67 @@ class FCMService {
       // Clear FCM token from user document
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        await _firestore.collection('users').doc(user.uid).update({
-          'fcmToken': FieldValue.delete(),
-        });
+        try {
+          // Check if document exists before updating
+          final userDoc = await _firestore.collection('users').doc(user.uid).get();
+          if (userDoc.exists) {
+            await _firestore.collection('users').doc(user.uid).update({
+              'fcmToken': FieldValue.delete(),
+            });
+          }
+        } catch (e) {
+          print('⚠️ FCM: Error clearing FCM token, continuing logout: $e');
+          // Don't throw - allow logout to continue even if this fails
+        }
       }
       
       print('✅ FCM: Cleanup complete');
     } catch (e) {
       print('❌ FCM: Cleanup failed: $e');
+      // Don't throw - we want logout to succeed even if FCM cleanup fails
+    }
+  }
+  
+  /// Send push notification to a specific user
+  static Future<void> sendPushNotification({
+    required String userId,
+    required String title,
+    required String body,
+    String? imageUrl,
+    Map<String, dynamic>? data,
+  }) async {
+    try {
+      // Get user's FCM token
+      final userDoc = await _firestore.collection('users').doc(userId).get();
+      final fcmToken = userDoc.data()?['fcmToken'] as String?;
+      
+      if (fcmToken == null || fcmToken.isEmpty) {
+        print('❌ FCM: User $userId has no FCM token');
+        return;
+      }
+      
+      // Prepare notification payload
+      final message = {
+        'notification': {
+          'title': title,
+          'body': body,
+          if (imageUrl != null) 'image': imageUrl,
+        },
+        'data': data ?? {},
+        'token': fcmToken,
+      };
+      
+      // Call Firebase Cloud Function to send notification
+      // This requires a Cloud Function to be set up
+      await _firestore.collection('notifications').add({
+        'to': fcmToken,
+        'message': message,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+      
+      print('✅ FCM: Push notification sent to user $userId');
+    } catch (e) {
+      print('❌ FCM: Failed to send push notification: $e');
     }
   }
 }

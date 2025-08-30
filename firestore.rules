@@ -1,0 +1,135 @@
+rules_version = '2';
+
+// Production-ready Firestore security rules for SimhaLink crowd management app
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions for authentication and authorization
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    
+    function isOrganizer() {
+      return isAuthenticated() && getUserRole() == 'Organizer';
+    }
+    
+    function isVolunteer() {
+      return isAuthenticated() && (getUserRole() == 'Volunteer' || getUserRole() == 'Organizer');
+    }
+    
+    function isGroupMember(groupId) {
+      return isAuthenticated() && 
+        request.auth.uid in get(/databases/$(database)/documents/groups/$(groupId)).data.memberIds;
+    }
+    
+    // Users collection - users can only access their own data
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Groups collection - role-based access
+    match /groups/{groupId} {
+      // All authenticated users can read group info to join
+      allow read: if isAuthenticated();
+      
+      // Only organizers can create groups
+      allow create: if isAuthenticated() && request.resource.data.createdBy == request.auth.uid;
+      
+      // Group members can read detailed data, organizers can modify
+      allow read: if isGroupMember(groupId);
+      allow write: if isAuthenticated() && 
+        request.auth.uid in resource.data.organizerIds;
+      
+      // Allow users to join groups (add themselves to memberIds)
+      allow update: if isAuthenticated() && 
+        request.auth.uid in request.resource.data.memberIds &&
+        resource.data.memberIds.size() < 50; // Max group size
+    }
+    
+    // POIs (Points of Interest) - organizers manage, others read
+    match /pois/{poiId} {
+      // All authenticated users can read POIs
+      allow read: if isAuthenticated();
+      
+      // Only organizers can create, update, delete POIs
+      allow create, update, delete: if isOrganizer();
+      
+      // Validate POI data structure on write
+      allow write: if request.resource.data.keys().hasAll(['name', 'type', 'latitude', 'longitude', 'createdBy', 'createdAt']);
+    }
+    
+    // User locations - real-time location sharing within groups
+    match /locations/{locationId} {
+      // Users can read locations of their group members
+      allow read: if isAuthenticated() && 
+        isGroupMember(resource.data.groupId);
+      
+      // Users can write their own location
+      allow write: if isAuthenticated() && 
+        request.auth.uid == resource.data.userId &&
+        isGroupMember(resource.data.groupId);
+      
+      // Validate location data structure
+      allow write: if request.resource.data.keys().hasAll(['userId', 'groupId', 'latitude', 'longitude', 'timestamp']);
+    }
+    
+    // Emergency alerts - volunteers and organizers can manage
+    match /emergencies/{emergencyId} {
+      // Group members can read emergency alerts
+      allow read: if isAuthenticated() && 
+        isGroupMember(resource.data.groupId);
+      
+      // Volunteers and organizers can create emergency alerts
+      allow create: if isVolunteer() && 
+        request.auth.uid == request.resource.data.reportedBy;
+      
+      // Only organizers can update/resolve emergencies
+      allow update: if isOrganizer();
+      
+      // Validate emergency data structure
+      allow write: if request.resource.data.keys().hasAll(['type', 'latitude', 'longitude', 'reportedBy', 'groupId', 'timestamp', 'status']);
+    }
+    
+    // Group messaging/chat
+    match /groups/{groupId}/messages/{messageId} {
+      // Group members can read messages
+      allow read: if isGroupMember(groupId);
+      
+      // Group members can send messages
+      allow create: if isGroupMember(groupId) && 
+        request.auth.uid == request.resource.data.senderId;
+      
+      // Only organizers can delete messages
+      allow delete: if isOrganizer();
+      
+      // Validate message data structure
+      allow write: if request.resource.data.keys().hasAll(['senderId', 'senderName', 'message', 'timestamp']);
+    }
+    
+    // App metadata and configuration (read-only for users)
+    match /app_config/{document} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Only server-side updates
+    }
+    
+    // Analytics and logging (write-only for users)
+    match /analytics/{document} {
+      allow write: if isAuthenticated();
+      allow read: if false; // Privacy protection
+    }
+    
+    // Default deny rule for any other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

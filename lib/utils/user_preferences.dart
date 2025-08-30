@@ -2,10 +2,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:simha_link/services/state_sync_service.dart';
 
 class UserPreferences {
   static const String _userGroupIdKey = 'user_group_id';
-  static const String _defaultGroupId = 'default_group';
 
   /// Get user-specific key to prevent cross-user preference conflicts
   static String _getUserSpecificKey(String baseKey, String? userId) {
@@ -23,16 +23,45 @@ class UserPreferences {
       debugPrint('🗑️ Removed group ID for user: ${user?.uid}');
     } else {
       await prefs.setString(key, groupId);
-      debugPrint('💾 Set group ID for user ${user?.uid}: $groupId');
+      debugPrint('💾 Set group ID for user ${user?.uid}: $groupId (using key: $key)');
+      
+      // Also backup to a user-email based key for persistence across login sessions
+      if (user != null && user.email != null) {
+        final emailBackupKey = 'email_group_${user.email!.replaceAll('.', '_')}';
+        await prefs.setString(emailBackupKey, groupId);
+        debugPrint('💾 Backed up group ID to email-based key: $emailBackupKey');
+      }
     }
   }
 
   static Future<String?> getUserGroupId() async {
     final prefs = await SharedPreferences.getInstance();
     final user = FirebaseAuth.instance.currentUser;
-    final key = _getUserSpecificKey(_userGroupIdKey, user?.uid);
-    final groupId = prefs.getString(key);
-    debugPrint('📖 Get user group ID for ${user?.uid ?? 'unknown'}: $groupId');
+    
+    if (user == null) {
+      debugPrint('⚠️ Cannot get group ID: No authenticated user');
+      return null;
+    }
+    
+    final key = _getUserSpecificKey(_userGroupIdKey, user.uid);
+    var groupId = prefs.getString(key);
+    
+    // Try to recover from email-based backup if primary key has no value
+    if (groupId == null && user.email != null) {
+      final emailBackupKey = 'email_group_${user.email!.replaceAll('.', '_')}';
+      final backupGroupId = prefs.getString(emailBackupKey);
+      
+      if (backupGroupId != null) {
+        debugPrint('🔄 Recovered group ID from email backup: $backupGroupId');
+        // Restore to the primary key
+        await setUserGroupId(backupGroupId);
+        groupId = backupGroupId;
+      }
+    }
+    
+    // Debug logging with more details to help troubleshoot
+    debugPrint('📖 Get user group ID for ${user.uid}: $groupId (using key: $key)');
+    
     return groupId;
   }
 
@@ -135,11 +164,11 @@ class UserPreferences {
       
       // Check if group is now empty and cleanup if needed
       if (groupId.isNotEmpty) {
-        // Never delete special groups (volunteers, organizers, default_group)
+        // Never delete special groups (volunteers, organizers) or personal groups
         if (groupId == 'volunteers' || 
             groupId == 'organizers' || 
-            groupId == _defaultGroupId) {
-          debugPrint('🔒 Skipping cleanup for special group: $groupId');
+            groupId.startsWith('default_')) {
+          debugPrint('🔒 Skipping cleanup for special/personal group: $groupId');
           return;
         }
         
@@ -175,11 +204,11 @@ class UserPreferences {
   static Future<void> cleanupEmptyGroup(String groupId) async {
     if (groupId.isEmpty) return;
     
-    // Never delete special groups (volunteers, organizers, default_group)
+    // Never delete special groups (volunteers, organizers) or personal groups
     if (groupId == 'volunteers' || 
         groupId == 'organizers' || 
-        groupId == _defaultGroupId) {
-      debugPrint('🔒 Skipping cleanup for special group: $groupId');
+        groupId.startsWith('default_')) {
+      debugPrint('🔒 Skipping cleanup for special/personal group: $groupId');
       return;
     }
     
@@ -255,21 +284,27 @@ class UserPreferences {
     if (user == null) return null;
 
     try {
+      // Create a unique default group for each user instead of using a shared one
+      final userDefaultGroupId = 'default_${user.uid}';
+      
       final defaultGroupRef = FirebaseFirestore.instance
           .collection('groups')
-          .doc(_defaultGroupId);
+          .doc(userDefaultGroupId);
 
       final defaultGroup = await defaultGroupRef.get();
 
       if (!defaultGroup.exists) {
         await defaultGroupRef.set({
-          'id': _defaultGroupId,
-          'name': 'Default Group',
-          'type': 'default',
+          'id': userDefaultGroupId,
+          'name': 'My Group',
+          'type': 'personal',
           'createdAt': FieldValue.serverTimestamp(),
+          'createdBy': user.uid,
           'memberIds': [user.uid],
+          'description': 'Personal group for solo use',
+          'joinCode': '', // Personal groups don't need join codes
         });
-        await setUserGroupId(_defaultGroupId);
+        await setUserGroupId(userDefaultGroupId);
       } else {
         // Add user to existing default group if not already a member
         final memberIds = (defaultGroup.data()?['memberIds'] as List<dynamic>?) ?? [];
@@ -278,19 +313,27 @@ class UserPreferences {
             'memberIds': FieldValue.arrayUnion([user.uid])
           });
         }
-        // Always set the user group ID to default group
-        await setUserGroupId(_defaultGroupId);
+        // Always set the user group ID to their personal group
+        await setUserGroupId(userDefaultGroupId);
       }
 
-      return _defaultGroupId;
+      return userDefaultGroupId;
     } catch (e) {
       debugPrint('Error creating default group: $e');
       return null;
+    } finally {
+      // Force state sync after group creation/assignment
+      try {
+        await StateSyncService.forceSyncState();
+      } catch (e) {
+        debugPrint('Error syncing state after default group creation: $e');
+      }
     }
   }
 
   static Future<bool> isDefaultGroup(String groupId) async {
-    return groupId == _defaultGroupId;
+    // Check if it's a personal default group (format: default_<userId>)
+    return groupId.startsWith('default_');
   }
 
   static Future<void> setHasSkippedGroup(bool value) async {
@@ -301,5 +344,45 @@ class UserPreferences {
   static Future<bool> hasSkippedGroup() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getBool('has_skipped_group') ?? false;
+  }
+
+  /// Fix for users who were incorrectly assigned to the shared default_group
+  /// This migrates them to their own personal group
+  static Future<bool> migrateFromSharedDefaultGroup() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return false;
+
+    try {
+      final currentGroupId = await getUserGroupId();
+      
+      // Check if user is in the old shared default_group
+      if (currentGroupId == 'default_group') {
+        debugPrint('🔄 Migrating user ${user.uid} from shared default_group to personal group');
+        
+        // Remove user from the old shared group
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc('default_group')
+            .update({
+          'memberIds': FieldValue.arrayRemove([user.uid])
+        });
+        
+        // Clear their current group assignment
+        await clearGroupData();
+        
+        // Create their new personal group
+        final newGroupId = await createDefaultGroupIfNeeded();
+        
+        if (newGroupId != null) {
+          debugPrint('✅ Successfully migrated user to personal group: $newGroupId');
+          return true;
+        }
+      }
+      
+      return false;
+    } catch (e) {
+      debugPrint('❌ Error during migration: $e');
+      return false;
+    }
   }
 }

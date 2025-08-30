@@ -14,6 +14,7 @@ import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/utils/error_handler.dart';
 import 'package:simha_link/services/routing_service.dart';
 import 'package:simha_link/config/app_colors.dart';
+import 'package:simha_link/screens/auth_wrapper.dart';
 
 // Import the new managers and widgets
 import 'managers/location_manager.dart';
@@ -796,7 +797,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               
               await UserPreferences.clearGroupData();
               if (mounted) {
-                Navigator.of(context).pushReplacementNamed('/auth');
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (context) => const AuthWrapper()),
+                );
               }
             }
           },

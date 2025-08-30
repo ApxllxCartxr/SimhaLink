@@ -10,10 +10,15 @@ import 'package:simha_link/models/user_location.dart';
 import 'package:simha_link/models/poi.dart';
 import 'package:flutter_map_marker_cluster/flutter_map_marker_cluster.dart';
 import 'package:simha_link/screens/group_chat_screen.dart';
+import 'package:simha_link/screens/broadcast_list_screen.dart';
+import 'package:simha_link/services/broadcast_service.dart';
 import 'package:simha_link/utils/user_preferences.dart';
+import 'package:simha_link/widgets/state_sync_status_widget.dart';
 import 'package:simha_link/utils/error_handler.dart';
 import 'package:simha_link/services/routing_service.dart';
 import 'package:simha_link/config/app_colors.dart';
+import 'package:simha_link/core/utils/app_logger.dart';
+import 'package:simha_link/screens/auth_wrapper.dart';
 
 // Import the new managers and widgets
 import 'map/managers/location_manager.dart';
@@ -114,7 +119,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         _initializeManagers();
       }
     } catch (e) {
-      debugPrint('Error getting user role: $e');
+      AppLogger.logError('Error getting user role', e);
     }
   }
 
@@ -256,7 +261,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         );
       }
     } catch (e) {
-      debugPrint('Error getting current location: $e');
+      AppLogger.logError('Error getting current location', e);
     }
   }
 
@@ -640,13 +645,79 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
   }
 
+  /// Build broadcast button with unread count badge
+  Widget _buildBroadcastButton() {
+    return StreamBuilder<int>(
+      stream: BroadcastService.getUnreadCountStream(),
+      builder: (context, snapshot) {
+        final unreadCount = snapshot.data ?? 0;
+        
+        return Stack(
+          children: [
+            FloatingActionButton(
+              heroTag: "broadcast",
+              onPressed: _navigateToBroadcasts,
+              backgroundColor: AppColors.primary,
+              child: const Icon(
+                Icons.campaign,
+                color: Colors.white,
+                size: 24,
+              ),
+            ),
+            
+            // Unread count badge
+            if (unreadCount > 0)
+              Positioned(
+                right: 0,
+                top: 0,
+                child: Container(
+                  padding: const EdgeInsets.all(4),
+                  decoration: const BoxDecoration(
+                    color: Colors.red,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Text(
+                    unreadCount > 99 ? '99+' : unreadCount.toString(),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Navigate to broadcast list screen
+  Future<void> _navigateToBroadcasts() async {
+    try {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (context) => const BroadcastListScreen(),
+        ),
+      );
+    } catch (e, stackTrace) {
+      AppLogger.logError('Error navigating to broadcasts', e, stackTrace);
+    }
+  }
+
   @override
   void dispose() {
-    _groupLocationsSubscription?.cancel();
-    _poisSubscription?.cancel();
-    _locationManager.dispose();
-    _emergencyManager.dispose();
-    _mapController.dispose();
+    try {
+      AppLogger.logInfo('MapScreen disposing resources');
+      _groupLocationsSubscription?.cancel();
+      _poisSubscription?.cancel();
+      _locationManager.dispose();
+      _emergencyManager.dispose();
+      _mapController.dispose();
+      AppLogger.logInfo('MapScreen resources disposed successfully');
+    } catch (e) {
+      AppLogger.logError('Error disposing MapScreen resources', e);
+    }
     super.dispose();
   }
 
@@ -805,6 +876,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // Broadcast button (always visible)
+                _buildBroadcastButton(),
+                const SizedBox(height: 8),
+                
                 // POI Creation button (Organizers only)
                 if (_userRole == 'Organizer' && !_isPlacingPOI) ...[
                   FloatingActionButton(
@@ -952,9 +1027,14 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               if (_userRole != 'Attendee') return;
               
               await UserPreferences.clearGroupData();
+              // Note: State sync will be disposed in AuthWrapper when user signs out
               if (mounted) {
-                Navigator.of(context).pushReplacementNamed('/auth');
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (context) => const AuthWrapper()),
+                );
               }
+            } else if (value == 'debug_state') {
+              _showStateSyncDebugDialog();
             }
           },
           itemBuilder: (context) => [
@@ -979,9 +1059,39 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 ],
               ),
             ),
+            const PopupMenuItem(
+              value: 'debug_state',
+              child: Row(
+                children: [
+                  Icon(Icons.bug_report),
+                  SizedBox(width: 8),
+                  Text('Debug State'),
+                ],
+              ),
+            ),
           ],
         ),
       ],
+    );
+  }
+
+  void _showStateSyncDebugDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('State Sync Debug'),
+        content: const SizedBox(
+          width: 400,
+          height: 300,
+          child: StateSyncStatusWidget(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 

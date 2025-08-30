@@ -2,9 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:simha_link/screens/auth_screen.dart';
-import 'package:simha_link/screens/map_screen.dart';
 import 'package:simha_link/screens/group_creation_screen.dart';
+import 'package:simha_link/screens/main_navigation_screen.dart';
 import 'package:simha_link/utils/user_preferences.dart';
+import 'package:simha_link/services/state_sync_service.dart';
 import 'package:simha_link/widgets/loading_widgets.dart';
 
 class AuthWrapper extends StatelessWidget {
@@ -17,6 +18,13 @@ class AuthWrapper extends StatelessWidget {
       builder: (context, snapshot) {
         // Debug auth state changes
         debugPrint('🔄 AuthWrapper: Auth state changed - ${snapshot.data?.uid ?? 'null'}');
+        
+        // CRITICAL: If user is null, immediately show auth screen without waiting
+        // This ensures fast response to logout events
+        if (snapshot.data == null) {
+          debugPrint('🚪 AuthWrapper: User not authenticated, showing auth screen immediately');
+          return const AuthScreen();
+        }
         
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Scaffold(
@@ -48,9 +56,9 @@ class AuthWrapper extends StatelessWidget {
                 return const GroupCreationScreen();
               }
               
-              // User has a group, show map screen
-              debugPrint('🗺️ AuthWrapper: Group found ($groupId), showing map');
-              return MapScreen(groupId: groupId);
+              // User has a group, show main navigation screen with map
+              debugPrint('🗺️ AuthWrapper: Group found ($groupId), showing navigation');
+              return MainNavigationScreen(groupId: groupId);
             },
           );
         }
@@ -90,6 +98,12 @@ class AuthWrapper extends StatelessWidget {
         final userRole = userData['role'] as String?;
 
         debugPrint('🔍 AuthWrapper: User ${user.uid} has role: $userRole');
+
+        // Check and fix users who were incorrectly assigned to shared default_group
+        await UserPreferences.migrateFromSharedDefaultGroup();
+
+        // Initialize state synchronization
+        await StateSyncService.initialize();
 
         // IMPORTANT: Clear any local group preferences that don't match the user's role
         // This prevents cross-user group contamination
@@ -145,6 +159,9 @@ class AuthWrapper extends StatelessWidget {
                 
                 if (memberIds.contains(user.uid)) {
                   // User is still a valid member
+                  // Re-save the group ID to ensure it's stored correctly
+                  await UserPreferences.setUserGroupId(savedGroupId);
+                  debugPrint('✅ AuthWrapper: Verified and re-saved group ID: $savedGroupId');
                   return savedGroupId;
                 } else {
                   // User was removed from group, clear their data and let them choose a new one

@@ -3,6 +3,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/auth_service.dart';
 import '../config/app_colors.dart';
+import '../core/utils/app_logger.dart';
+import '../screens/group_info_bottom_sheet.dart';
 
 class GroupChatScreen extends StatefulWidget {
   final String groupId;
@@ -19,6 +21,33 @@ class GroupChatScreen extends StatefulWidget {
 class _GroupChatScreenState extends State<GroupChatScreen> {
   final _messageController = TextEditingController();
   final _scrollController = ScrollController();
+  String _userRole = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserRole();
+  }
+
+  Future<void> _loadUserRole() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        final userDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .get();
+        
+        if (userDoc.exists && mounted) {
+          setState(() {
+            _userRole = userDoc.data()?['role'] ?? 'Participant';
+          });
+        }
+      }
+    } catch (e) {
+      AppLogger.logError('Error loading user role', e);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -29,6 +58,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         foregroundColor: AppColors.textOnPrimary,
         title: const Text('Group Chat'),
         elevation: 0,
+        actions: [
+          IconButton(
+            onPressed: _showGroupInfo,
+            icon: const Icon(Icons.info_outline),
+            tooltip: 'Group Information',
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -186,6 +222,36 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOut,
     );
+  }
+
+  void _showGroupInfo() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => GroupInfoBottomSheet(
+        groupId: widget.groupId,
+        currentUserRole: _userRole,
+        onGroupLeft: _handleGroupLeft,
+        onGroupDeleted: _handleGroupDeleted,
+        onMemberKicked: _handleMemberKicked,
+      ),
+    );
+  }
+
+  void _handleGroupLeft() {
+    // Navigate back to main screen or group selection
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  void _handleGroupDeleted() {
+    // Navigate back to main screen or group selection
+    Navigator.of(context).popUntil((route) => route.isFirst);
+  }
+
+  void _handleMemberKicked() {
+    // Refresh the chat or show notification
+    // The UI will automatically update through streams
   }
 
   @override

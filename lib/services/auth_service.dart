@@ -1,6 +1,9 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:simha_link/services/state_sync_service.dart';
+import 'package:simha_link/services/fcm_service.dart';
+import 'package:simha_link/utils/user_preferences.dart';
 
 class AuthService {
   static final AuthService _instance = AuthService._internal();
@@ -118,21 +121,56 @@ class AuthService {
       print('🚪 Starting sign out process...');
       
       // Get current user before signing out
-      final currentUserId = _auth.currentUser?.uid;
+      final currentUser = _auth.currentUser;
       
-      // IMPORTANT: Do NOT clear user preferences on logout
-      // User should return to same group when they log back in
-      print('💾 Preserving group data for user: $currentUserId (logout, not leave group)');
+      // IMPORTANT: We need to preserve the group ID so when user logs back in,
+      // they don't have to rejoin a group
+      if (currentUser != null) {
+        try {
+          final groupId = await UserPreferences.getUserGroupId();
+          print('💾 Preserving group ID for user ${currentUser.uid}: $groupId');
+          
+          // Extra safety: Verify and save the group ID again to ensure it persists
+          if (groupId != null && groupId.isNotEmpty) {
+            await UserPreferences.setUserGroupId(groupId);
+            print('✅ Re-saved group ID before logout: $groupId');
+          } else {
+            print('⚠️ No group ID found to preserve before logout');
+          }
+        } catch (e) {
+          print('⚠️ Error preserving group ID: $e');
+        }
+      }
       
-      await Future.wait([
-        _auth.signOut(),
-        _googleSignIn.signOut(),
-      ]);
+      // First clean up FCM subscriptions
+      try {
+        await FCMService.cleanup();
+        print('✅ FCM cleanup successful');
+      } catch (e) {
+        print('⚠️ FCM cleanup error (continuing with logout): $e');
+        // Don't block logout if FCM cleanup fails
+      }
+      
+      // Then sign out from auth providers
+      try {
+        await _googleSignIn.signOut();
+        print('✅ Google Sign-In logout successful');
+      } catch (e) {
+        print('⚠️ Google Sign-In logout error: $e');
+        // Continue with Firebase logout even if Google logout fails
+      }
+      
+      // Finally sign out from Firebase
+      await _auth.signOut();
+      print('✅ Firebase Auth logout successful');
+      
+      // Dispose state sync service on logout
+      StateSyncService.dispose();
       
       print('✅ Sign out successful - Firebase auth cleared, group data preserved');
       
       // Add a small delay to ensure auth state propagates
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 300));
       
     } catch (e) {
       print('❌ Sign out failed: $e');
