@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:simha_link/services/firestore_lock_service.dart';
 import 'package:simha_link/screens/auth_screen.dart';
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/screens/main_navigation_screen.dart';
+import 'package:simha_link/screens/profile_onboarding_screen.dart';
 import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/services/state_sync_service.dart';
 import 'package:simha_link/widgets/loading_widgets.dart';
@@ -38,7 +40,7 @@ class AuthWrapper extends StatelessWidget {
           // User is authenticated, check if they have a group
           debugPrint('👤 AuthWrapper: User authenticated, checking group...');
           return FutureBuilder<String?>(
-            future: _checkUserGroupAndRole(snapshot.data!),
+            future: _checkUserGroupAndRole(context, snapshot.data!),
             builder: (context, groupSnapshot) {
               if (groupSnapshot.connectionState == ConnectionState.waiting) {
                 return const Scaffold(
@@ -70,7 +72,7 @@ class AuthWrapper extends StatelessWidget {
     );
   }
 
-  Future<String?> _checkUserGroupAndRole(User user) async {
+  Future<String?> _checkUserGroupAndRole(BuildContext context, User user) async {
     try {
       // Add retry logic for new users - sometimes Firestore write hasn't completed
       DocumentSnapshot? userDoc;
@@ -93,9 +95,39 @@ class AuthWrapper extends StatelessWidget {
         }
       }
 
+        if (userDoc == null || !userDoc.exists) {
+        // If the user is authenticated but has no document yet, create a minimal profile
+        try {
+          debugPrint('⚠️ AuthWrapper: No user document found for ${user.uid}, creating default profile');
+          final initialData = {
+            'email': user.email,
+            'displayName': user.displayName,
+            'photoURL': user.photoURL,
+            'role': 'Attendee', // default role
+            'createdAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          };
+          await FirebaseFirestore.instance.collection('users').doc(user.uid).set(initialData);
+          userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        } catch (e) {
+          debugPrint('❌ AuthWrapper: Failed to create default user document: $e');
+        }
+      }
+
       if (userDoc != null && userDoc.exists) {
         final userData = userDoc.data() as Map<String, dynamic>;
         final userRole = userData['role'] as String?;
+          // If displayName or role is missing, show onboarding to collect them
+          final needsOnboarding = (userData['displayName'] == null || (userData['displayName'] as String).trim().isEmpty) ||
+              (userData['role'] == null || (userData['role'] as String).trim().isEmpty);
+
+          if (needsOnboarding) {
+            final completed = await showProfileOnboardingDialog(context);
+            if (completed == true) {
+              userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+              debugPrint('✅ AuthWrapper: Onboarding completed, refreshing user document');
+            }
+          }
 
         debugPrint('🔍 AuthWrapper: User ${user.uid} has role: $userRole');
 
@@ -277,13 +309,15 @@ class AuthWrapper extends StatelessWidget {
       if (groupId == 'volunteers' || groupId == 'organizers') {
         await _ensureSpecialGroupExists(groupId, groupId == 'volunteers' ? 'Volunteers' : 'Organizers');
         // Retry adding user
-        await FirebaseFirestore.instance
-            .collection('groups')
-            .doc(groupId)
-            .update({
-          'memberIds': FieldValue.arrayUnion([userId])
-        });
-        debugPrint('👤 Added user $userId to newly created group $groupId');
+        await FirestoreLockService.runWithLock('group_op_$groupId', userId, () async {
+          await FirebaseFirestore.instance
+              .collection('groups')
+              .doc(groupId)
+              .update({
+            'memberIds': FieldValue.arrayUnion([userId])
+          });
+        }, ttlSeconds: 8);
+        debugPrint('👤 Added user $userId to newly created group $groupId (with lock)');
       } else {
         debugPrint('❌ Error adding user to group: $e');
       }
@@ -293,14 +327,16 @@ class AuthWrapper extends StatelessWidget {
   /// Remove user from a group and cleanup if empty
   Future<void> _removeUserFromGroup(String groupId, String userId) async {
     try {
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(groupId)
-          .update({
-        'memberIds': FieldValue.arrayRemove([userId])
-      });
+      await FirestoreLockService.runWithLock('group_op_$groupId', userId, () async {
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .update({
+          'memberIds': FieldValue.arrayRemove([userId])
+        });
+      }, ttlSeconds: 8);
       
-      debugPrint('👤 Removed user $userId from group $groupId');
+      debugPrint('👤 Removed user $userId from group $groupId (with lock)');
       
       // Cleanup empty group
       await UserPreferences.cleanupEmptyGroup(groupId);

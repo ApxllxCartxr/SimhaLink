@@ -9,25 +9,23 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:simha_link/models/user_location.dart';
 import 'package:simha_link/models/poi.dart';
 import 'package:flutter_map_marker_cluster/flutter_map_marker_cluster.dart';
-import 'package:simha_link/screens/group_chat_screen.dart';
 import 'package:simha_link/screens/broadcast_list_screen.dart';
 import 'package:simha_link/services/broadcast_service.dart';
-import 'package:simha_link/utils/user_preferences.dart';
-import 'package:simha_link/widgets/state_sync_status_widget.dart';
 import 'package:simha_link/utils/error_handler.dart';
 import 'package:simha_link/services/routing_service.dart';
 import 'package:simha_link/config/app_colors.dart';
 import 'package:simha_link/core/utils/app_logger.dart';
-import 'package:simha_link/screens/auth_wrapper.dart';
 
 // Import the new managers and widgets
 import 'map/managers/location_manager.dart';
 import 'map/managers/emergency_manager.dart';
 import 'map/managers/marker_manager.dart';
+import 'map/managers/heatmap_manager.dart';
 import 'map/widgets/map_info_panel.dart';
 import 'map/widgets/map_legend.dart';
 import 'map/widgets/emergency_dialog.dart';
 import 'map/widgets/marker_action_bottom_sheet.dart';
+import '../widgets/heatmap_layer.dart';
 
 class MapScreen extends StatefulWidget {
   final String groupId;
@@ -48,6 +46,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   late LocationManager _locationManager;
   late EmergencyManager _emergencyManager;
   late MarkerManager _markerManager;
+  // Heatmap manager
+  HeatmapPointsManager? _heatmapManager;
+  List<LatLng> _heatmapPoints = [];
+  StreamSubscription<List<LatLng>>? _heatmapSub;
   
   // Data streams
   StreamSubscription<QuerySnapshot>? _groupLocationsSubscription;
@@ -68,6 +70,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   List<LatLng> _currentRoute = [];
   bool _isLoadingRoute = false;
   String _routeInfo = '';
+  // Heatmap UI state
+  bool _showHeatmap = true;
+  double _heatmapRadiusPx = 100.0;
+  double _heatmapOpacity = 0.85;
 
   @override
   void initState() {
@@ -90,6 +96,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       userRole: _userRole,
       isMapReady: _isMapReady,
     );
+  _heatmapManager = HeatmapPointsManager(groupId: widget.groupId);
   }
 
   Future<void> _setupInitialData() async {
@@ -98,6 +105,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _listenToGroupLocations();
     _listenToPOIs();
     _startEmergencyListeners();
+    // Heatmap
+    _heatmapSub = _heatmapManager?.pointsStream.listen((pts) {
+      if (mounted) setState(() => _heatmapPoints = pts);
+    });
+  _startHeatmap();
   }
 
   Future<void> _getUserRole() async {
@@ -195,6 +207,77 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         });
       }
     });
+  }
+
+  void _startHeatmap() {
+    try {
+      _heatmapManager?.start(window: const Duration(minutes: 5));
+    } catch (_) {}
+  }
+
+  void _stopHeatmap() {
+    try {
+      _heatmapSub?.cancel();
+      _heatmapManager?.stop();
+    } catch (_) {}
+  }
+
+  void _openHeatmapSettings() {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) {
+        double tmpRadius = _heatmapRadiusPx;
+        double tmpOpacity = _heatmapOpacity;
+        return StatefulBuilder(
+          builder: (context, setStateSheet) => Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Heatmap Settings', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                Text('Radius: ${tmpRadius.toStringAsFixed(0)} px'),
+                Slider(
+                  min: 10,
+                  max: 300,
+                  value: tmpRadius,
+                  onChanged: (v) => setStateSheet(() => tmpRadius = v),
+                ),
+                const SizedBox(height: 8),
+                Text('Opacity: ${ (tmpOpacity * 100).round() }%'),
+                Slider(
+                  min: 0.0,
+                  max: 1.0,
+                  value: tmpOpacity,
+                  onChanged: (v) => setStateSheet(() => tmpOpacity = v),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Cancel'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          _heatmapRadiusPx = tmpRadius;
+                          _heatmapOpacity = tmpOpacity;
+                        });
+                        Navigator.of(context).pop();
+                      },
+                      child: const Text('Apply'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   void _startEmergencyListeners() {
@@ -338,9 +421,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                poi.name,
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
+                  poi.name,
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
             ),
           ],
         ),
@@ -713,6 +796,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       _poisSubscription?.cancel();
       _locationManager.dispose();
       _emergencyManager.dispose();
+  _stopHeatmap();
       _mapController.dispose();
       AppLogger.logInfo('MapScreen resources disposed successfully');
     } catch (e) {
@@ -731,7 +815,24 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
 
     return Scaffold(
-      appBar: _buildAppBar(),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton(
+            heroTag: 'heatmap_toggle',
+            onPressed: () => setState(() => _showHeatmap = !_showHeatmap),
+            backgroundColor: _showHeatmap ? AppColors.primary : AppColors.surface,
+            child: Icon(_showHeatmap ? Icons.whatshot : Icons.whatshot_outlined, color: _showHeatmap ? Colors.white : AppColors.primary),
+          ),
+          const SizedBox(height: 8),
+          FloatingActionButton(
+            heroTag: 'heatmap_settings',
+            onPressed: () => _openHeatmapSettings(),
+            backgroundColor: AppColors.surface,
+            child: const Icon(Icons.tune, color: Colors.black87),
+          ),
+        ],
+      ),
       body: Stack(
         children: [
           // Map
@@ -777,6 +878,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 tileProvider: NetworkTileProvider(),
                 subdomains: const ['a', 'b', 'c', 'd'],
               ),
+              // Heatmap overlay (built from Firestore location points)
+              if (_showHeatmap)
+                HeatmapLayer(
+                  points: _heatmapPoints,
+                  mapController: _mapController,
+                  radiusPx: _heatmapRadiusPx,
+                  enabled: _heatmapPoints.isNotEmpty,
+                  opacity: _heatmapOpacity,
+                ),
               // Current location circle
               if (_locationManager.currentLocation != null)
                 CircleLayer(
@@ -954,169 +1064,5 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
-  AppBar _buildAppBar() {
-    return AppBar(
-      backgroundColor: Colors.white,
-      elevation: 0,
-      leading: IconButton(
-        icon: const Icon(Icons.logout, color: Colors.black),
-        onPressed: () async {
-          await FirebaseAuth.instance.signOut();
-        },
-      ),
-      title: FutureBuilder<Map<String, String>>(
-        future: _getGroupAndUserInfo(),
-        builder: (context, snapshot) {
-          if (snapshot.hasData) {
-            final data = snapshot.data!;
-            final groupName = data['groupName'] ?? 'Simha Link Map';
-            final userRole = data['userRole'];
-            
-            return Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  groupName,
-                  style: const TextStyle(
-                    color: Colors.black,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (userRole != null)
-                  Text(
-                    userRole,
-                    style: TextStyle(
-                      color: Colors.grey[600],
-                      fontSize: 12,
-                    ),
-                  ),
-              ],
-            );
-          }
-          return const Text(
-            'Simha Link Map',
-            style: TextStyle(
-              color: Colors.black,
-              fontSize: 18,
-              fontWeight: FontWeight.w500,
-            ),
-          );
-        },
-      ),
-      centerTitle: true,
-      actions: [
-        IconButton(
-          icon: const Icon(Icons.chat, color: Colors.black),
-          tooltip: 'Group Chat',
-          onPressed: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => GroupChatScreen(groupId: widget.groupId),
-              ),
-            );
-          },
-        ),
-        PopupMenuButton<String>(
-          icon: const Icon(Icons.more_vert, color: Colors.black),
-          onSelected: (value) async {
-            if (value == 'logout') {
-              await FirebaseAuth.instance.signOut();
-            } else if (value == 'leave_group') {
-              if (_userRole != 'Attendee') return;
-              
-              await UserPreferences.clearGroupData();
-              // Note: State sync will be disposed in AuthWrapper when user signs out
-              if (mounted) {
-                Navigator.of(context).pushReplacement(
-                  MaterialPageRoute(builder: (context) => const AuthWrapper()),
-                );
-              }
-            } else if (value == 'debug_state') {
-              _showStateSyncDebugDialog();
-            }
-          },
-          itemBuilder: (context) => [
-            if (_userRole == 'Attendee')
-              const PopupMenuItem(
-                value: 'leave_group',
-                child: Row(
-                  children: [
-                    Icon(Icons.exit_to_app),
-                    SizedBox(width: 8),
-                    Text('Leave Group'),
-                  ],
-                ),
-              ),
-            const PopupMenuItem(
-              value: 'logout',
-              child: Row(
-                children: [
-                  Icon(Icons.logout),
-                  SizedBox(width: 8),
-                  Text('Logout'),
-                ],
-              ),
-            ),
-            const PopupMenuItem(
-              value: 'debug_state',
-              child: Row(
-                children: [
-                  Icon(Icons.bug_report),
-                  SizedBox(width: 8),
-                  Text('Debug State'),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  void _showStateSyncDebugDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('State Sync Debug'),
-        content: const SizedBox(
-          width: 400,
-          height: 300,
-          child: StateSyncStatusWidget(),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<Map<String, String>> _getGroupAndUserInfo() async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return {'groupName': 'Simha Link Map'};
-
-      final groupDoc = await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(widget.groupId)
-          .get();
-
-      String groupName = 'Simha Link Map';
-      if (groupDoc.exists) {
-        groupName = groupDoc.data()?['name'] ?? 'Simha Link Map';
-      }
-
-      return {
-        'groupName': groupName,
-        if (_userRole != null) 'userRole': _userRole!,
-      };
-    } catch (e) {
-      debugPrint('Error getting group and user info: $e');
-      return {'groupName': 'Simha Link Map'};
-    }
-  }
+  // Top navigation AppBar removed per new UI. Helper methods were deleted.
 }

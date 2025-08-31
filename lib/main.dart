@@ -11,6 +11,7 @@ import 'package:simha_link/screens/main_navigation_screen.dart';
 import 'package:simha_link/firebase_options.dart';
 import 'package:simha_link/config/theme.dart';
 import 'package:simha_link/services/fcm_service.dart';
+import 'package:simha_link/services/in_app_broadcast_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -22,9 +23,14 @@ void main() async {
   
   // Initialize FCM for push notifications
   await FCMService.initialize();
+
+  // Initialize in-app broadcast listener (proof-of-concept)
+  await InAppBroadcastService.initialize(_navigatorKey);
   
   runApp(const MainApp());
 }
+
+final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
 
 class MainApp extends StatelessWidget {
   const MainApp({super.key});
@@ -33,6 +39,7 @@ class MainApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Simha Link',
+  navigatorKey: _navigatorKey,
       theme: AppTheme.lightTheme,
       debugShowCheckedModeBanner: false,
       home: const AuthWrapper(),

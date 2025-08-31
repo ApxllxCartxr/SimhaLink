@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:simha_link/services/state_sync_service.dart';
+import 'package:simha_link/services/firestore_lock_service.dart';
 
 class UserPreferences {
   static const String _userGroupIdKey = 'user_group_id';
@@ -100,12 +101,22 @@ class UserPreferences {
       debugPrint('Error checking user role before clearing group data: $e');
     }
     
-    // Clear user-specific local preferences
+  // Clear user-specific local preferences under a lock to avoid races
+  final ownerId = user.uid;
+  await FirestoreLockService.runWithLock('group_${user.uid}', ownerId, () async {
     final prefs = await SharedPreferences.getInstance();
     final key = _getUserSpecificKey(_userGroupIdKey, user.uid);
     await prefs.remove(key);
     await prefs.remove('has_skipped_group_${user.uid}'); // Clear any skip flags
+    // Also remove email-based backup key to avoid accidental recovery
+    if (user.email != null) {
+      final emailBackupKey = 'email_group_${user.email!.replaceAll('.', '_')}';
+      await prefs.remove(emailBackupKey);
+      debugPrint('🧹 Removed email backup key: $emailBackupKey');
+    }
+
     debugPrint('🧹 Group data cleared for user: ${user.uid}');
+  }, ttlSeconds: 8);
   }
 
   /// Clear any restrictions that might prevent attendees from joining new groups
@@ -143,6 +154,14 @@ class UserPreferences {
     // Also remove old non-user-specific keys for cleanup
     await prefs.remove(_userGroupIdKey);
     await prefs.remove('has_skipped_group');
+    // Remove email-based backup keys that may belong to this user
+    final emailBackupKeyPrefix = 'email_group_';
+    for (final key in keys) {
+      if (key.startsWith(emailBackupKeyPrefix) && key.contains(userId.substring(0, 5))) {
+        await prefs.remove(key);
+        debugPrint('🧹 Removed email backup preference: $key');
+      }
+    }
     
     debugPrint('🧹 All preferences cleared for user: $userId');
   }
@@ -159,8 +178,25 @@ class UserPreferences {
       
       debugPrint('🚪 User $userId removed from group $groupId');
       
+      // Also clear the user's group reference in their user document so
+      // StateSyncService sees Firebase has no group and won't restore it locally
+      try {
+        await FirebaseFirestore.instance.collection('users').doc(userId).update({
+          'groupId': FieldValue.delete(),
+          'lastLeftGroup': FieldValue.serverTimestamp(),
+        });
+        debugPrint('📝 Cleared groupId in user document for $userId');
+      } catch (e) {
+        debugPrint('⚠️ Failed to clear groupId in user doc: $e');
+      }
+      
       // Clear local preferences for this user (FIRST, before group deletion)
-      await clearGroupData();
+      final ownerId = userId;
+
+      // Run the remove + user doc update inside a lock to avoid concurrent re-writes
+      await FirestoreLockService.runWithLock('group_op_$groupId', ownerId, () async {
+        await clearGroupData();
+      }, ttlSeconds: 10);
       
       // Check if group is now empty and cleanup if needed
       if (groupId.isNotEmpty) {
@@ -193,7 +229,13 @@ class UserPreferences {
           }
         }
       }
-      
+      // Force a state sync to ensure local preferences match Firebase state
+      try {
+        await StateSyncService.forceSyncState();
+        debugPrint('🔄 Forced state sync after leaving group');
+      } catch (e) {
+        debugPrint('⚠️ Failed to force state sync: $e');
+      }
     } catch (e) {
       debugPrint('❌ Error leaving group and cleaning up: $e');
       rethrow;
@@ -359,13 +401,15 @@ class UserPreferences {
       if (currentGroupId == 'default_group') {
         debugPrint('🔄 Migrating user ${user.uid} from shared default_group to personal group');
         
-        // Remove user from the old shared group
-        await FirebaseFirestore.instance
-            .collection('groups')
-            .doc('default_group')
-            .update({
-          'memberIds': FieldValue.arrayRemove([user.uid])
-        });
+        // Remove user from the old shared group under a lock
+        await FirestoreLockService.runWithLock('group_op_default_group', user.uid, () async {
+          await FirebaseFirestore.instance
+              .collection('groups')
+              .doc('default_group')
+              .update({
+            'memberIds': FieldValue.arrayRemove([user.uid])
+          });
+        }, ttlSeconds: 8);
         
         // Clear their current group assignment
         await clearGroupData();

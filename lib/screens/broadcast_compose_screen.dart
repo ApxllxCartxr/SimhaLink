@@ -18,6 +18,7 @@ class _BroadcastComposeScreenState extends State<BroadcastComposeScreen> {
   final _formKey = GlobalKey<FormState>();
   final _titleController = TextEditingController();
   final _contentController = TextEditingController();
+  final _messageController = TextEditingController();
   
   BroadcastTarget _selectedTarget = BroadcastTarget.allUsers;
   BroadcastPriority _selectedPriority = BroadcastPriority.normal;
@@ -54,6 +55,7 @@ class _BroadcastComposeScreenState extends State<BroadcastComposeScreen> {
   @override
   void dispose() {
     _titleController.dispose();
+  _messageController.dispose();
     _contentController.dispose();
     super.dispose();
   }
@@ -67,6 +69,7 @@ class _BroadcastComposeScreenState extends State<BroadcastComposeScreen> {
       final success = await BroadcastService.sendBroadcast(
         title: _titleController.text,
         content: _contentController.text,
+        message: _messageController.text,
         target: _selectedTarget,
         priority: _selectedPriority,
       );
@@ -153,7 +156,8 @@ class _BroadcastComposeScreenState extends State<BroadcastComposeScreen> {
   }
 
   Widget _buildComposeForm() {
-    return Padding(
+    // Make the form scrollable and add a short "Message (short)" field.
+    return SingleChildScrollView(
       padding: const EdgeInsets.all(16.0),
       child: Form(
         key: _formKey,
@@ -239,71 +243,83 @@ class _BroadcastComposeScreenState extends State<BroadcastComposeScreen> {
             ),
             const SizedBox(height: 16),
 
-            // Message Content
-            Expanded(
-              child: Card(
-                elevation: 2,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Message Content',
-                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.bold,
-                        ),
+            // Message Content (fixed height so it's visible on smaller screens)
+            Card(
+              elevation: 2,
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Message Content',
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.bold,
                       ),
-                      const SizedBox(height: 12),
+                    ),
+                    const SizedBox(height: 12),
 
-                      // Title Field
-                      TextFormField(
-                        controller: _titleController,
+                    // Short message (used for push notification body)
+                    TextFormField(
+                      controller: _messageController,
+                      decoration: const InputDecoration(
+                        labelText: 'Message (short)',
+                        hintText: 'Short notification text (optional)',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.notification_important),
+                      ),
+                      maxLength: 120,
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Title Field
+                    TextFormField(
+                      controller: _titleController,
+                      decoration: const InputDecoration(
+                        labelText: 'Title',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.title),
+                      ),
+                      maxLength: 100,
+                      validator: (value) {
+                        if (value == null || value.trim().isEmpty) {
+                          return 'Title is required';
+                        }
+                        if (value.trim().length < 3) {
+                          return 'Title must be at least 3 characters';
+                        }
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Content Field - fixed height so it stays visible and scrolls with the page.
+                    SizedBox(
+                      height: 260,
+                      child: TextFormField(
+                        controller: _contentController,
                         decoration: const InputDecoration(
-                          labelText: 'Title',
+                          labelText: 'Message Content',
                           border: OutlineInputBorder(),
-                          prefixIcon: Icon(Icons.title),
+                          prefixIcon: Icon(Icons.message),
+                          alignLabelWithHint: true,
                         ),
-                        maxLength: 100,
+                        maxLines: null,
+                        expands: true,
+                        textAlignVertical: TextAlignVertical.top,
+                        maxLength: 1000,
                         validator: (value) {
                           if (value == null || value.trim().isEmpty) {
-                            return 'Title is required';
+                            return 'Message content is required';
                           }
-                          if (value.trim().length < 3) {
-                            return 'Title must be at least 3 characters';
+                          if (value.trim().length < 10) {
+                            return 'Message must be at least 10 characters';
                           }
                           return null;
                         },
                       ),
-                      const SizedBox(height: 16),
-
-                      // Content Field
-                      Expanded(
-                        child: TextFormField(
-                          controller: _contentController,
-                          decoration: const InputDecoration(
-                            labelText: 'Message Content',
-                            border: OutlineInputBorder(),
-                            prefixIcon: Icon(Icons.message),
-                            alignLabelWithHint: true,
-                          ),
-                          maxLines: null,
-                          expands: true,
-                          textAlignVertical: TextAlignVertical.top,
-                          maxLength: 1000,
-                          validator: (value) {
-                            if (value == null || value.trim().isEmpty) {
-                              return 'Message content is required';
-                            }
-                            if (value.trim().length < 10) {
-                              return 'Message must be at least 10 characters';
-                            }
-                            return null;
-                          },
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ),

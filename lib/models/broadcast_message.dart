@@ -6,6 +6,7 @@ class BroadcastMessage {
   final String id;
   final String title;
   final String content;
+  final String? message; // short notification message/body for push
   final String senderId;
   final String senderName;
   final String senderRole;
@@ -20,6 +21,7 @@ class BroadcastMessage {
     required this.id,
     required this.title,
     required this.content,
+    this.message,
     required this.senderId,
     required this.senderName,
     required this.senderRole,
@@ -37,7 +39,8 @@ class BroadcastMessage {
     return BroadcastMessage(
       id: doc.id,
       title: data['title'] ?? '',
-      content: data['content'] ?? '',
+  content: data['content'] ?? '',
+  message: data['message'] ?? '',
       senderId: data['senderId'] ?? '',
       senderName: data['senderName'] ?? '',
       senderRole: data['senderRole'] ?? '',
@@ -54,7 +57,8 @@ class BroadcastMessage {
   Map<String, dynamic> toFirestore() {
     return {
       'title': title,
-      'content': content,
+  'content': content,
+  'message': message,
       'senderId': senderId,
       'senderName': senderName,
       'senderRole': senderRole,
@@ -71,7 +75,8 @@ class BroadcastMessage {
   BroadcastMessage copyWith({
     String? id,
     String? title,
-    String? content,
+  String? content,
+  String? message,
     String? senderId,
     String? senderName,
     String? senderRole,
@@ -85,7 +90,8 @@ class BroadcastMessage {
     return BroadcastMessage(
       id: id ?? this.id,
       title: title ?? this.title,
-      content: content ?? this.content,
+  content: content ?? this.content,
+  message: message ?? this.message,
       senderId: senderId ?? this.senderId,
       senderName: senderName ?? this.senderName,
       senderRole: senderRole ?? this.senderRole,

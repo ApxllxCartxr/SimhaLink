@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/core/utils/app_logger.dart';
+import 'package:simha_link/services/firestore_lock_service.dart';
 
 /// Service to ensure local state is always synchronized with Firebase state
 class StateSyncService {
@@ -23,16 +24,15 @@ class StateSyncService {
       return;
     }
     
-    _currentUserId = user.uid;
+  _currentUserId = user.uid;
     AppLogger.logInfo('Initializing state sync for user: ${user.uid}');
     
     // Start syncing user document
     await _syncUserDocument();
     
-    // Start syncing group document
-    await _syncGroupDocument();
+  // Start syncing group document
+  await _syncGroupDocument();
   }
-  
   /// Sync user document with local preferences
   static Future<void> _syncUserDocument() async {
     if (_currentUserId == null) return;
@@ -152,14 +152,19 @@ class StateSyncService {
     
     try {
       final userRef = _firestore.collection('users').doc(_currentUserId!);
-      
-      if (groupId != null) {
-        await userRef.update({'groupId': groupId});
-      } else {
-        await userRef.update({'groupId': FieldValue.delete()});
-      }
-      
-      AppLogger.logInfo('📝 Updated user group in Firestore: $groupId');
+      final ownerId = _currentUserId!;
+      final resourceId = 'user_group_${_currentUserId!}';
+
+      // Use a short advisory lock to avoid other clients re-writing user's group concurrently
+      await FirestoreLockService.runWithLock(resourceId, ownerId, () async {
+        if (groupId != null) {
+          await userRef.update({'groupId': groupId});
+        } else {
+          await userRef.update({'groupId': FieldValue.delete()});
+        }
+      }, ttlSeconds: 8);
+
+      AppLogger.logInfo('📝 Updated user group in Firestore: $groupId (with lock)');
     } catch (e, stackTrace) {
       AppLogger.logError('Error updating user group in Firestore', e, stackTrace);
     }

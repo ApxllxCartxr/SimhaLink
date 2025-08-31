@@ -1,17 +1,17 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:simha_link/screens/auth_screen.dart';
-import 'package:simha_link/screens/broadcast_compose_screen.dart';
-import 'package:simha_link/screens/broadcast_list_screen.dart';
-import 'package:simha_link/screens/emergency_communication_list_screen.dart';
-import 'package:simha_link/screens/emergency_communication_screen.dart';
+import 'package:simha_link/screens/auth_wrapper.dart';
+
+
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/screens/map_screen.dart';
+import 'package:simha_link/screens/profile_screen.dart';
+import 'package:simha_link/screens/group_chat_screen.dart';
 import 'package:simha_link/services/auth_service.dart';
-import 'package:simha_link/services/broadcast_service.dart';
 import 'package:simha_link/services/emergency_communication_service.dart';
 import 'package:simha_link/utils/user_preferences.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+ 
 
 /// Main navigation container with a bottom navigation bar
 /// Handles routing between main screens and maintaining navigation state
@@ -30,16 +30,41 @@ class MainNavigationScreen extends StatefulWidget {
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _selectedIndex = 0;
   late String _groupId;
-  String? _userRole;
+  // _userRole removed - role-specific UI now handled elsewhere
   bool _isLoading = true;
   bool _isLeavingGroup = false;
   bool _isLoggingOut = false;
+  StreamSubscription<User?>? _authSubscription;
 
   @override
   void initState() {
     super.initState();
     _groupId = widget.groupId;
     _getUserRole();
+    // Aggressive fallback: listen for global auth state changes and
+    // force navigation to the auth wrapper when the user signs out.
+    _authSubscription = FirebaseAuth.instance.authStateChanges().listen((user) {
+      if (user == null) {
+        // Ensure this runs after the current frame to avoid navigation during build
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          try {
+            Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+              MaterialPageRoute(builder: (context) => const AuthWrapper()),
+              (_) => false,
+            );
+          } catch (_) {
+            // ignore navigation errors - this is a best-effort fallback
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _authSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _getUserRole() async {
@@ -47,19 +72,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) return;
 
-      final userDoc = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .get();
-      
       if (mounted) {
         setState(() {
-          if (userDoc.exists) {
-            final userData = userDoc.data();
-            _userRole = userData?['role'] as String?;
-          } else {
-            _userRole = null;
-          }
           _isLoading = false;
         });
       }
@@ -89,22 +103,14 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
           : IndexedStack(
               index: _selectedIndex,
               children: [
-                // Main map screen (index 0)
+                // Profile (left)
+                const ProfileScreen(),
+
+                // Map (middle)
                 MapScreen(groupId: _groupId),
-                
-                // Communications screens
-                if (_userRole?.toLowerCase() == 'organizer')
-                  const BroadcastListScreen()
-                else
-                  const EmergencyCommunicationListScreen(),
-                
-                // Additional screens based on role
-                if (_userRole?.toLowerCase() == 'organizer')
-                  const BroadcastComposeScreen()
-                else if (_userRole?.toLowerCase() == 'volunteer')
-                  const EmergencyCommunicationScreen()
-                else
-                  const SizedBox(), // Placeholder for participants
+
+                // Group Chat (right)
+                GroupChatScreen(groupId: _groupId),
               ],
             ),
       bottomNavigationBar: isPhone
@@ -126,39 +132,20 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       unselectedItemColor: Colors.grey,
       items: [
         const BottomNavigationBarItem(
+          icon: Icon(Icons.person),
+          label: 'Profile',
+        ),
+        const BottomNavigationBarItem(
           icon: Icon(Icons.map),
           label: 'Map',
         ),
-        
-        // Communications item with badge
         BottomNavigationBarItem(
           icon: _buildBadgedIcon(
-            icon: Icons.message,
-            stream: _userRole?.toLowerCase() == 'organizer'
-                ? BroadcastService.getUnreadCountStream()
-                : EmergencyCommunicationService.getUnreadCountStream(),
+            icon: Icons.chat,
+            stream: EmergencyCommunicationService.getUnreadCountStream(),
           ),
-          label: _userRole?.toLowerCase() == 'organizer'
-              ? 'Broadcasts'
-              : 'Communications',
+          label: 'Chat',
         ),
-        
-        // Action item based on role
-        if (_userRole?.toLowerCase() == 'organizer')
-          const BottomNavigationBarItem(
-            icon: Icon(Icons.campaign),
-            label: 'Broadcast',
-          )
-        else if (_userRole?.toLowerCase() == 'volunteer')
-          const BottomNavigationBarItem(
-            icon: Icon(Icons.emergency),
-            label: 'Emergency',
-          )
-        else
-          const BottomNavigationBarItem(
-            icon: Icon(Icons.person),
-            label: 'Profile',
-          ),
       ],
     );
   }
@@ -433,21 +420,12 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         // Pop the dialog first
         Navigator.of(context, rootNavigator: true).pop();
         
-        // Completely clear the navigation stack and show the auth screen
-        Navigator.of(context, rootNavigator: true).pushNamedAndRemoveUntil(
-          '/auth',
+        // Completely clear the navigation stack and show the AuthWrapper
+        // (AuthWrapper will read auth state and show the correct screen).
+        Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const AuthWrapper()),
           (_) => false, // Remove all routes
         );
-        
-        // Backup approach in case named route navigation fails
-        Future.delayed(const Duration(milliseconds: 100), () {
-          if (mounted) {
-            Navigator.of(context, rootNavigator: true).pushAndRemoveUntil(
-              MaterialPageRoute(builder: (context) => const AuthScreen()),
-              (_) => false,
-            );
-          }
-        });
       }
     } catch (e) {
       // Handle errors

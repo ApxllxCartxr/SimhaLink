@@ -3,6 +3,8 @@ import 'package:simha_link/models/emergency_communication.dart';
 import 'package:simha_link/services/emergency_communication_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:simha_link/utils/user_preferences.dart';
+import 'package:simha_link/screens/group_info_screen.dart';
 
 /// Screen for displaying emergency communications
 /// Shows different views for organizers and volunteers
@@ -65,6 +67,19 @@ class _EmergencyCommunicationListScreenState extends State<EmergencyCommunicatio
         title: const Text('Emergency Communications'),
         backgroundColor: Colors.red.shade800,
         foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            onPressed: () async {
+              final groupId = await UserPreferences.getUserGroupId();
+              if (groupId == null) {
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('You are not in a group')));
+                return;
+              }
+              Navigator.push(context, MaterialPageRoute(builder: (c) => GroupInfoScreen(groupId: groupId)));
+            },
+          ),
+        ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())

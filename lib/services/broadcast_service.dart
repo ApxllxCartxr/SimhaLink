@@ -21,6 +21,7 @@ class BroadcastService {
   static Future<bool> sendBroadcast({
     required String title,
     required String content,
+  String? message,
     required BroadcastTarget target,
     required BroadcastPriority priority,
     String? groupId,
@@ -69,6 +70,7 @@ class BroadcastService {
         id: '', // Will be set by Firestore
         title: title.trim(),
         content: content.trim(),
+  message: message?.trim(),
         senderId: user.uid,
         senderName: userData['name'] ?? 'Organizer',
         senderRole: senderRole,
@@ -78,17 +80,11 @@ class BroadcastService {
         groupId: target == BroadcastTarget.myGroup ? groupId : null,
       );
 
-      // Save to Firestore
-      final docRef = await _firestore
-          .collection(_broadcastCollection)
-          .add(broadcast.toFirestore());
-
-      AppLogger.logInfo('Broadcast created successfully: ${docRef.id}, target: ${target.value}, priority: ${priority.value}');
-
-      // Send push notifications asynchronously (don't block success response)
-      _sendPushNotifications(broadcast.copyWith(id: docRef.id));
-
-      return true;
+  // Write broadcast directly to Firestore so clients receive it via realtime
+  // listeners. Note: without Cloud Functions we won't send FCM pushes here.
+  final docRef = await _firestore.collection(_broadcastCollection).add(broadcast.toFirestore());
+  AppLogger.logInfo('Broadcast written to Firestore: ${docRef.id}');
+  return true;
     } catch (e, stackTrace) {
       AppLogger.logError('Failed to send broadcast', e, stackTrace);
       return false;
@@ -205,85 +201,7 @@ class BroadcastService {
     }
   }
 
-  /// Send push notifications to target users
-  /// This prepares the notification payload but actual sending requires server implementation
-  static Future<void> _sendPushNotifications(BroadcastMessage broadcast) async {
-    try {
-      AppLogger.logInfo('Preparing push notifications for broadcast: ${broadcast.id}');
-      
-      // Get target users based on broadcast settings
-      Query query = _firestore.collection(_usersCollection);
-      
-      // Filter by target roles
-      final targetRoles = broadcast.target.getTargetRoles();
-      // Convert to lowercase for database compatibility
-      final lowerCaseRoles = targetRoles.map((role) => role.toLowerCase()).toList();
-      
-      if (lowerCaseRoles.isNotEmpty) {
-        // Note: Firestore 'whereIn' has a limit of 10 items
-        if (lowerCaseRoles.length <= 10) {
-          query = query.where('role', whereIn: lowerCaseRoles);
-        } else {
-          // For more than 10 roles, we'd need multiple queries or server-side filtering
-          AppLogger.logWarning('Too many target roles for single query: ${lowerCaseRoles.length}');
-        }
-      }
-      
-      // Filter by group if needed
-      if (broadcast.target == BroadcastTarget.myGroup && broadcast.groupId != null) {
-        query = query.where('groupId', isEqualTo: broadcast.groupId);
-      }
-
-      final snapshot = await query.get();
-      
-      // Collect FCM tokens from target users
-      final tokens = <String>[];
-      for (final doc in snapshot.docs) {
-        final data = doc.data() as Map<String, dynamic>;
-        final token = data['fcmToken'] as String?;
-        if (token != null && token.isNotEmpty) {
-          tokens.add(token);
-        }
-      }
-
-      if (tokens.isEmpty) {
-        AppLogger.logInfo('No FCM tokens found for broadcast recipients');
-        return;
-      }
-
-      // Create notification payload based on priority
-      // ignore: unused_local_variable
-      final notification = {
-        'title': broadcast.priority == BroadcastPriority.urgent 
-            ? '🚨 ${broadcast.title}'
-            : broadcast.title,
-        'body': broadcast.content,
-        'priority': broadcast.priority == BroadcastPriority.urgent ? 'high' : 'normal',
-        'sound': broadcast.priority.level >= BroadcastPriority.high.level ? 'default' : null,
-      };
-
-      // ignore: unused_local_variable
-      final data = {
-        'type': 'broadcast',
-        'broadcastId': broadcast.id,
-        'priority': broadcast.priority.value,
-        'senderId': broadcast.senderId,
-        'createdAt': broadcast.createdAt.toIso8601String(),
-      };
-
-      // Log notification preparation (actual sending requires server implementation)
-      AppLogger.logInfo('Prepared push notification for ${tokens.length} users for broadcast: ${broadcast.id}');
-      
-      // TODO: Use notification and data payload for actual FCM sending
-      // Example: await FirebaseMessaging.instance.sendMulticast(MulticastMessage(tokens: tokens, notification: notification, data: data));
-
-      // TODO: Implement actual FCM sending via cloud function or server
-      // For now, we simulate the notification preparation
-
-    } catch (e, stackTrace) {
-      AppLogger.logError('Failed to send push notifications', e, stackTrace);
-    }
-  }
+  // NOTE: push sending is performed server-side by Cloud Functions 'sendBroadcast'.
 
   /// Check if user should receive a specific broadcast based on role and group
   /// This implements the targeting logic for broadcasts
