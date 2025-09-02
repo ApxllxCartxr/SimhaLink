@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:simha_link/services/auth_service.dart';
+import 'package:simha_link/services/group_management_service.dart';
 import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/screens/group_info_screen.dart';
 import 'package:simha_link/screens/auth_wrapper.dart';
+import 'package:simha_link/widgets/app_snackbar.dart';
+import 'package:simha_link/core/utils/app_logger.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
