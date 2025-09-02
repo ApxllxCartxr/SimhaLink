@@ -20,12 +20,10 @@ import 'package:simha_link/core/utils/app_logger.dart';
 import 'map/managers/location_manager.dart';
 import 'map/managers/emergency_manager.dart';
 import 'map/managers/marker_manager.dart';
-import 'map/managers/heatmap_manager.dart';
 import 'map/widgets/map_info_panel.dart';
 import 'map/widgets/map_legend.dart';
 import 'map/widgets/emergency_dialog.dart';
 import 'map/widgets/marker_action_bottom_sheet.dart';
-import '../widgets/heatmap_layer.dart';
 
 class MapScreen extends StatefulWidget {
   final String groupId;
@@ -46,10 +44,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   late LocationManager _locationManager;
   late EmergencyManager _emergencyManager;
   late MarkerManager _markerManager;
-  // Heatmap manager
-  HeatmapPointsManager? _heatmapManager;
-  List<LatLng> _heatmapPoints = [];
-  StreamSubscription<List<LatLng>>? _heatmapSub;
   
   // Data streams
   StreamSubscription<QuerySnapshot>? _groupLocationsSubscription;
@@ -70,10 +64,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   List<LatLng> _currentRoute = [];
   bool _isLoadingRoute = false;
   String _routeInfo = '';
-  // Heatmap UI state
-  bool _showHeatmap = true;
-  double _heatmapRadiusPx = 100.0;
-  double _heatmapOpacity = 0.85;
 
   @override
   void initState() {
@@ -96,7 +86,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       userRole: _userRole,
       isMapReady: _isMapReady,
     );
-  _heatmapManager = HeatmapPointsManager(groupId: widget.groupId);
   }
 
   Future<void> _setupInitialData() async {
@@ -105,11 +94,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _listenToGroupLocations();
     _listenToPOIs();
     _startEmergencyListeners();
-    // Heatmap
-    _heatmapSub = _heatmapManager?.pointsStream.listen((pts) {
-      if (mounted) setState(() => _heatmapPoints = pts);
-    });
-  _startHeatmap();
   }
 
   Future<void> _getUserRole() async {
@@ -209,95 +193,133 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     });
   }
 
-  void _startHeatmap() {
-    try {
-      _heatmapManager?.start(window: const Duration(minutes: 5));
-    } catch (_) {}
-  }
-
-  void _stopHeatmap() {
-    try {
-      _heatmapSub?.cancel();
-      _heatmapManager?.stop();
-    } catch (_) {}
-  }
-
-  void _openHeatmapSettings() {
-    showModalBottomSheet(
-      context: context,
-      builder: (context) {
-        double tmpRadius = _heatmapRadiusPx;
-        double tmpOpacity = _heatmapOpacity;
-        return StatefulBuilder(
-          builder: (context, setStateSheet) => Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text('Heatmap Settings', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 12),
-                Text('Radius: ${tmpRadius.toStringAsFixed(0)} px'),
-                Slider(
-                  min: 10,
-                  max: 300,
-                  value: tmpRadius,
-                  onChanged: (v) => setStateSheet(() => tmpRadius = v),
-                ),
-                const SizedBox(height: 8),
-                Text('Opacity: ${ (tmpOpacity * 100).round() }%'),
-                Slider(
-                  min: 0.0,
-                  max: 1.0,
-                  value: tmpOpacity,
-                  onChanged: (v) => setStateSheet(() => tmpOpacity = v),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('Cancel'),
-                    ),
-                    ElevatedButton(
-                      onPressed: () {
-                        setState(() {
-                          _heatmapRadiusPx = tmpRadius;
-                          _heatmapOpacity = tmpOpacity;
-                        });
-                        Navigator.of(context).pop();
-                      },
-                      child: const Text('Apply'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   void _startEmergencyListeners() {
     _emergencyManager.listenToEmergencies(() {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {
+          // Force rebuild to update emergency markers
+        });
+      }
     });
     
     _emergencyManager.listenToNearbyVolunteers(
       _locationManager.currentLocation,
       () {
-        if (mounted) setState(() {});
+        if (mounted) {
+          setState(() {
+            // Force rebuild to update volunteer locations
+          });
+        }
       },
     );
     
     _emergencyManager.listenToAllVolunteers(() {
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {
+          // Force rebuild to update all volunteer locations
+        });
+      }
+    });
+
+    // Listen for new emergencies and show in-app notifications
+    if (_userRole == 'Volunteer' || _userRole == 'Organizer') {
+      _listenForNewEmergencies();
+    }
+  }
+
+  /// Listen for new emergencies and show in-app notifications to volunteers
+  void _listenForNewEmergencies() {
+    final Set<String> knownEmergencies = {};
+    
+    // Initialize known emergencies from current state
+    for (final member in _groupMembers) {
+      if (member.isEmergency) {
+        knownEmergencies.add(member.userId);
+      }
+    }
+    
+    FirebaseFirestore.instance
+        .collectionGroup('locations')
+        .where('isEmergency', isEqualTo: true)
+        .snapshots()
+        .listen((snapshot) {
+      for (final docChange in snapshot.docChanges) {
+        if (docChange.type == DocumentChangeType.added) {
+          final emergency = UserLocation.fromMap(docChange.doc.data()!);
+          
+          // Don't notify about our own emergency or already known ones
+          if (emergency.userId == FirebaseAuth.instance.currentUser?.uid ||
+              knownEmergencies.contains(emergency.userId)) {
+            continue;
+          }
+          
+          knownEmergencies.add(emergency.userId);
+          
+          // Force map rebuild to show new emergency marker
+          if (mounted) {
+            setState(() {
+              // This will trigger a rebuild and show the new emergency marker
+            });
+            
+            // Show in-app notification
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Row(
+                  children: [
+                    const Icon(Icons.warning, color: Colors.white),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '🚨 Emergency: ${emergency.userName} needs assistance!',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 5),
+                action: SnackBarAction(
+                  label: 'VIEW',
+                  textColor: Colors.white,
+                  onPressed: () {
+                    // Center map on emergency location
+                    _mapController.move(
+                      LatLng(emergency.latitude, emergency.longitude),
+                      16.0,
+                    );
+                  },
+                ),
+              ),
+            );
+          }
+        } else if (docChange.type == DocumentChangeType.removed) {
+          final emergency = UserLocation.fromMap(docChange.doc.data()!);
+          knownEmergencies.remove(emergency.userId);
+          
+          // Force map rebuild to remove emergency marker
+          if (mounted) {
+            setState(() {
+              // This will trigger a rebuild and hide the resolved emergency marker
+            });
+            
+            // Show emergency resolved notification
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('✅ Emergency resolved: ${emergency.userName}'),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+        }
+      }
     });
   }
 
   Future<void> _toggleEmergency() async {
+    // Only allow attendees to toggle emergency
+    if (_userRole != 'Attendee') return;
+    
     final shouldActivate = _isEmergency ? true : await showEmergencyConfirmationDialog(context);
     if (!shouldActivate) return;
     
@@ -308,15 +330,22 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         onEmergencyChanged: (newStatus) {
           setState(() {
             _isEmergency = newStatus;
+            _locationManager.isEmergency = newStatus;
           });
         },
         context: context,
       );
       
-      // Update location with new emergency status
+      // Update location with new emergency status immediately
       if (_locationManager.currentLocation != null) {
         await _updateUserLocation(_locationManager.currentLocation!);
       }
+      
+      // Force refresh of all listeners to ensure immediate updates
+      setState(() {
+        // This will trigger a complete rebuild with new emergency status
+      });
+      
     } catch (e) {
       if (mounted) {
         ErrorHandler.showError(
@@ -796,7 +825,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       _poisSubscription?.cancel();
       _locationManager.dispose();
       _emergencyManager.dispose();
-  _stopHeatmap();
       _mapController.dispose();
       AppLogger.logInfo('MapScreen resources disposed successfully');
     } catch (e) {
@@ -815,24 +843,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
 
     return Scaffold(
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton(
-            heroTag: 'heatmap_toggle',
-            onPressed: () => setState(() => _showHeatmap = !_showHeatmap),
-            backgroundColor: _showHeatmap ? AppColors.primary : AppColors.surface,
-            child: Icon(_showHeatmap ? Icons.whatshot : Icons.whatshot_outlined, color: _showHeatmap ? Colors.white : AppColors.primary),
-          ),
-          const SizedBox(height: 8),
-          FloatingActionButton(
-            heroTag: 'heatmap_settings',
-            onPressed: () => _openHeatmapSettings(),
-            backgroundColor: AppColors.surface,
-            child: const Icon(Icons.tune, color: Colors.black87),
-          ),
-        ],
-      ),
+      floatingActionButton: null,
       body: Stack(
         children: [
           // Map
@@ -878,15 +889,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 tileProvider: NetworkTileProvider(),
                 subdomains: const ['a', 'b', 'c', 'd'],
               ),
-              // Heatmap overlay (built from Firestore location points)
-              if (_showHeatmap)
-                HeatmapLayer(
-                  points: _heatmapPoints,
-                  mapController: _mapController,
-                  radiusPx: _heatmapRadiusPx,
-                  enabled: _heatmapPoints.isNotEmpty,
-                  opacity: _heatmapOpacity,
-                ),
               // Current location circle
               if (_locationManager.currentLocation != null)
                 CircleLayer(
@@ -1013,18 +1015,20 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   const SizedBox(height: 8),
                 ],
                 
-                // Emergency button
-                FloatingActionButton(
-                  heroTag: "emergency",
-                  onPressed: _toggleEmergency,
-                  backgroundColor: _isEmergency ? AppColors.mapEmergency : AppColors.surface,
-                  foregroundColor: _isEmergency ? Colors.white : AppColors.mapEmergency,
-                  child: Icon(
-                    _isEmergency ? Icons.emergency : Icons.emergency_outlined,
-                    size: 28,
+                // Emergency button (Attendees only)
+                if (_userRole == 'Attendee') ...[
+                  FloatingActionButton(
+                    heroTag: "emergency",
+                    onPressed: _toggleEmergency,
+                    backgroundColor: _isEmergency ? AppColors.mapEmergency : AppColors.surface,
+                    foregroundColor: _isEmergency ? Colors.white : AppColors.mapEmergency,
+                    child: Icon(
+                      _isEmergency ? Icons.emergency : Icons.emergency_outlined,
+                      size: 28,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 8),
+                  const SizedBox(height: 8),
+                ],
                 // Location button
                 FloatingActionButton(
                   heroTag: "location",

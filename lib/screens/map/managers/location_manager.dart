@@ -58,6 +58,7 @@ class LocationManager {
         isEmergency: isEmergency,
         lastUpdated: DateTime.now(),
         userRole: userRole,
+        groupId: groupId,
       );
 
       debugPrint('📍 Updating user location - Emergency: $isEmergency (User: ${location.userName})');

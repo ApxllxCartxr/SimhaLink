@@ -227,6 +227,7 @@ class EmergencyManager {
             longitude: currentLocation.longitude!,
             isEmergency: true,
             lastUpdated: DateTime.now(),
+            groupId: groupId,
           );
 
           await NotificationService.sendEmergencyNotification(
