@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:simha_link/utils/user_preferences.dart';
+import 'package:simha_link/services/auth_service.dart';
+import 'package:simha_link/utils/validators.dart';
+import 'package:simha_link/config/app_colors.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -12,7 +15,6 @@ class AuthScreen extends StatefulWidget {
 
 class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
-  final _auth = FirebaseAuth.instance;
   bool _isLogin = true;
   bool _isLoading = false;
   bool _obscurePassword = true;
@@ -21,6 +23,7 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
   
   final TextEditingController _emailController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _nameController = TextEditingController();
   
   // Role selection for signup
   String _selectedRole = 'Attendee'; // Default role
@@ -41,6 +44,7 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
+    _nameController.dispose();
     _tabController.dispose();
     super.dispose();
   }
@@ -58,24 +62,25 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
       
       if (_isLogin) {
         print('📧 Attempting login with email: ${_emailController.text.trim()}');
-        UserCredential userCredential = await _auth.signInWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
+        await AuthService().signInWithEmailPassword(
+          _emailController.text.trim(),
+          _passwordController.text,
         );
-        print('✅ Login successful: ${userCredential.user?.uid}');
+        print('✅ Login successful');
         
         // For existing users, check their role and ensure proper group assignment
-        await _handleExistingUserLogin(userCredential.user!);
+        await _handleExistingUserLogin(FirebaseAuth.instance.currentUser!);
       } else {
         print('📝 Attempting registration with email: ${_emailController.text.trim()}');
-        UserCredential userCredential = await _auth.createUserWithEmailAndPassword(
-          email: _emailController.text.trim(),
-          password: _passwordController.text,
+        await AuthService().registerWithEmailPassword(
+          _emailController.text.trim(),
+          _passwordController.text,
+          _nameController.text.trim(),
         );
-        print('✅ Registration successful: ${userCredential.user?.uid}');
+        print('✅ Registration successful');
         
         // Save user role and handle group assignment
-        await _handleUserRoleAndGroup(userCredential.user!);
+        await _handleUserRoleAndGroup(FirebaseAuth.instance.currentUser!);
       }
       
       if (mounted) {
@@ -191,9 +196,13 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
           .doc(user.uid)
           .set({
         'uid': user.uid,
+        'displayName': user.displayName ?? _nameController.text.trim(),
         'email': user.email,
         'role': _selectedRole,
         'createdAt': FieldValue.serverTimestamp(),
+        'lastSeen': FieldValue.serverTimestamp(),
+        'isOnline': true,
+        'preferences': {},
       });
 
       // Handle group assignment based on role
@@ -258,7 +267,7 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF7F7F7),
+      backgroundColor: AppColors.backgroundLight,
       body: Stack(
         children: [
           // Grid Background
@@ -281,7 +290,7 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                         fontFamily: 'InstrumentSerif',
                         fontSize: 48,
                         fontWeight: FontWeight.bold,
-                        color: Colors.black,
+                        color: AppColors.primary,
                       ),
                     ),
                     const SizedBox(height: 8),
@@ -290,7 +299,7 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                       style: TextStyle(
                         fontFamily: 'InstrumentSerif',
                         fontSize: 16,
-                        color: Colors.black,
+                        color: AppColors.textSecondary,
                       ),
                     ),
                     const SizedBox(height: 48),
@@ -300,13 +309,14 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                       width: 400,
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
-                        color: Colors.white,
+                        color: AppColors.surface,
                         borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: AppColors.border),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withOpacity(0.05),
-                            blurRadius: 10,
-                            offset: const Offset(0, 5),
+                            color: AppColors.shadow,
+                            blurRadius: 20,
+                            offset: const Offset(0, 8),
                           ),
                         ],
                       ),
@@ -335,17 +345,25 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                                     border: OutlineInputBorder(),
                                   ),
                                   keyboardType: TextInputType.emailAddress,
-                                  validator: (value) {
-                                    if (value == null || value.isEmpty) {
-                                      return 'Please enter your email';
-                                    }
-                                    if (!value.contains('@')) {
-                                      return 'Please enter a valid email';
-                                    }
-                                    return null;
-                                  },
+                                  validator: Validators.validateEmail,
                                 ),
                                 const SizedBox(height: 16),
+                                
+                                // Name field for signup only
+                                if (!_isLogin) ...[
+                                  TextFormField(
+                                    controller: _nameController,
+                                    decoration: const InputDecoration(
+                                      labelText: 'Full Name',
+                                      prefixIcon: Icon(Icons.person),
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    keyboardType: TextInputType.name,
+                                    textCapitalization: TextCapitalization.words,
+                                    validator: Validators.validateName,
+                                  ),
+                                  const SizedBox(height: 16),
+                                ],
                                 TextFormField(
                                   controller: _passwordController,
                                   decoration: InputDecoration(
@@ -383,17 +401,19 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                                   Container(
                                     padding: const EdgeInsets.all(16),
                                     decoration: BoxDecoration(
-                                      border: Border.all(color: Theme.of(context).dividerColor),
-                                      borderRadius: BorderRadius.circular(8),
-                                      color: Theme.of(context).cardColor,
+                                      border: Border.all(color: AppColors.border),
+                                      borderRadius: BorderRadius.circular(12),
+                                      color: AppColors.backgroundLight,
                                     ),
                                     child: Column(
                                       crossAxisAlignment: CrossAxisAlignment.start,
                                       children: [
                                         Text(
                                           'Select your role:',
-                                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                          style: TextStyle(
+                                            fontSize: 16,
                                             fontWeight: FontWeight.bold,
+                                            color: AppColors.textPrimary,
                                           ),
                                         ),
                                         const SizedBox(height: 12),
@@ -429,17 +449,21 @@ class _AuthScreenState extends State<AuthScreen> with SingleTickerProviderStateM
                                       _submitForm();
                                     },
                                     style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.black,
-                                      foregroundColor: Colors.white,
-                                      disabledBackgroundColor: Colors.grey,
-                                      disabledForegroundColor: Colors.white,
+                                      backgroundColor: AppColors.primary,
+                                      foregroundColor: AppColors.textOnPrimary,
+                                      disabledBackgroundColor: AppColors.textHint,
+                                      disabledForegroundColor: AppColors.textOnPrimary,
+                                      elevation: 2,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
                                     ),
                                     child: _isLoading
-                                        ? const SizedBox(
+                                        ? SizedBox(
                                             width: 20,
                                             height: 20,
                                             child: CircularProgressIndicator(
-                                              color: Colors.white,
+                                              color: AppColors.textOnPrimary,
                                               strokeWidth: 2,
                                             ),
                                           )

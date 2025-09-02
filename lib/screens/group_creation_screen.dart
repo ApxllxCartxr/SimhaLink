@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:simha_link/screens/map_screen.dart';
+import 'package:simha_link/screens/main_navigation_screen.dart';
 import 'package:simha_link/utils/user_preferences.dart';
+import 'package:simha_link/services/state_sync_service.dart';
 
 class GroupCreationScreen extends StatefulWidget {
   const GroupCreationScreen({super.key});
@@ -56,6 +57,18 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
       // Set this as the user's current group
       await UserPreferences.setUserGroupId(groupId);
 
+      // Force state synchronization after group creation
+      await StateSyncService.forceSyncState();
+
+      // Update user document to ensure they can join/create groups
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({
+        'canJoinGroups': true,
+        'lastCreatedGroup': FieldValue.serverTimestamp(),
+      });
+
       if (mounted) {
         // Show join code dialog before navigating to map
         _showJoinCodeDialog(_groupNameController.text.trim(), joinCode, groupId);
@@ -102,23 +115,47 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
 
       final groupDoc = querySnapshot.docs.first;
       final groupId = groupDoc.id;
+      final groupData = groupDoc.data() as Map<String, dynamic>;
 
-      // Add user to the group
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(groupId)
-          .update({
-        'memberIds': FieldValue.arrayUnion([user.uid])
-      });
+      // Check if user is already in the group
+      final memberIds = List<String>.from(groupData['memberIds'] ?? []);
+      
+      if (memberIds.contains(user.uid)) {
+        // User is already in this group, just set it as active
+        await UserPreferences.setUserGroupId(groupId);
+        
+        // Force state synchronization after reactivating group
+        await StateSyncService.forceSyncState();
+      } else {
+        // Add user to the group
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .update({
+          'memberIds': FieldValue.arrayUnion([user.uid])
+        });
 
-      // Set this as the user's current group
-      await UserPreferences.setUserGroupId(groupId);
+        // Set this as the user's current group
+        await UserPreferences.setUserGroupId(groupId);
+
+        // Force state synchronization after joining group
+        await StateSyncService.forceSyncState();
+
+        // Update user document to mark they can join groups (clear any restrictions)
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .update({
+          'canJoinGroups': true,
+          'lastJoinedGroup': FieldValue.serverTimestamp(),
+        });
+      }
 
       if (mounted) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(
-            builder: (context) => MapScreen(groupId: groupId),
+            builder: (context) => MainNavigationScreen(groupId: groupId),
           ),
         );
       }
@@ -155,7 +192,7 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
           Navigator.pushReplacement(
             context,
             MaterialPageRoute(
-              builder: (context) => MapScreen(groupId: groupId),
+              builder: (context) => MainNavigationScreen(groupId: groupId),
             ),
           );
         }
@@ -244,7 +281,7 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
                 Navigator.pushReplacement(
                   context,
                   MaterialPageRoute(
-                    builder: (context) => MapScreen(groupId: groupId),
+                    builder: (context) => MainNavigationScreen(groupId: groupId),
                   ),
                 );
               },

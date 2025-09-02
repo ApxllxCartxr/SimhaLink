@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- SimhaLink primary colors (dark theme) -->
+    <color name="primary_color">#1976D2</color>
+    <color name="primary_dark">#0D47A1</color>
+    <color name="accent_color">#FF5722</color>
+    
+    <!-- Notification colors -->
+    <color name="notification_color">@color/primary_color</color>
+    
+    <!-- Emergency and alert colors -->
+    <color name="emergency_red">#F44336</color>
+    <color name="warning_orange">#FF9800</color>
+    <color name="success_green">#4CAF50</color>
+    
+    <!-- Background colors (dark theme) -->
+    <color name="background_light">#121212</color>
+    <color name="surface_white">#1E1E1E</color>
+    
+    <!-- Text colors (dark theme) -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#CCCCCC</color>
+    <color name="text_on_primary">#FFFFFF</color>
+</resources>

@@ -5,6 +5,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:simha_link/models/user_location.dart';
 import 'package:simha_link/models/poi.dart';
 import 'package:simha_link/models/user_profile.dart';
+import 'auth_service.dart';
 
 class LocationService {
   static final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -28,7 +29,7 @@ class LocationService {
           .doc(user.uid)
           .set({
         'userId': user.uid,
-        'userName': user.displayName ?? 'Unknown User',
+        'userName': AuthService.getUserDisplayName(user),
         'latitude': latitude,
         'longitude': longitude,
         'isEmergency': isEmergency,

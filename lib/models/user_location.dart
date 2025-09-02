@@ -5,6 +5,7 @@ class UserLocation {
   final double longitude;
   final bool isEmergency;
   final DateTime lastUpdated;
+  final String? userRole; // Add user role to identify volunteers/organizers
 
   UserLocation({
     required this.userId,
@@ -13,6 +14,7 @@ class UserLocation {
     required this.longitude,
     this.isEmergency = false,
     required this.lastUpdated,
+    this.userRole,
   });
 
   Map<String, dynamic> toMap() {
@@ -23,6 +25,7 @@ class UserLocation {
       'longitude': longitude,
       'isEmergency': isEmergency,
       'lastUpdated': lastUpdated.toIso8601String(),
+      'userRole': userRole,
     };
   }
 
@@ -34,6 +37,7 @@ class UserLocation {
       longitude: map['longitude']?.toDouble() ?? 0.0,
       isEmergency: map['isEmergency'] ?? false,
       lastUpdated: DateTime.parse(map['lastUpdated']),
+      userRole: map['userRole'] as String?,
     );
   }
 }
