@@ -15,15 +15,20 @@ import 'package:simha_link/utils/error_handler.dart';
 import 'package:simha_link/services/routing_service.dart';
 import 'package:simha_link/config/app_colors.dart';
 import 'package:simha_link/core/utils/app_logger.dart';
+import 'package:simha_link/services/geographic_marker_service.dart' as geo;
 
 // Import the new managers and widgets
 import 'map/managers/location_manager.dart';
-import 'map/managers/emergency_manager.dart';
+// REMOVED: emergency_manager.dart - using EmergencyManagementService instead
 import 'map/managers/marker_manager.dart';
 import 'map/widgets/map_info_panel.dart';
 import 'map/widgets/map_legend.dart';
-import 'map/widgets/emergency_dialog.dart';
 import 'map/widgets/marker_action_bottom_sheet.dart';
+import 'map/widgets/emergency_response_card.dart';
+import '../models/emergency_response.dart';
+import '../services/emergency_management_service.dart';
+import '../services/emergency_database_service.dart';
+import '../models/emergency.dart';
 
 class MapScreen extends StatefulWidget {
   final String groupId;
@@ -42,8 +47,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   
   // Managers
   late LocationManager _locationManager;
-  late EmergencyManager _emergencyManager;
+  // REMOVED: EmergencyManager - using EmergencyManagementService instead
   late MarkerManager _markerManager;
+  
+  // New Emergency Database System - Unified approach
+  StreamSubscription<List<Emergency>>? _emergenciesSubscription;
+  List<StreamSubscription<List<Emergency>>> _additionalEmergencySubscriptions = [];
+  List<Emergency> _activeEmergencies = [];
+  Emergency? _currentEmergencyResponse; // Current emergency volunteer is responding to
+  final Set<String> _notifiedEmergencies = <String>{};
   
   // Data streams
   StreamSubscription<QuerySnapshot>? _groupLocationsSubscription;
@@ -78,14 +90,248 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       userRole: _userRole,
       isEmergency: _isEmergency,
     );
-    _emergencyManager = EmergencyManager(
-      userRole: _userRole,
-      groupId: widget.groupId,
-    );
+    // REMOVED: Old emergency manager that used UserLocation objects
+    // Only use Emergency objects via EmergencyManagementService
     _markerManager = MarkerManager(
       userRole: _userRole,
       isMapReady: _isMapReady,
     );
+  }
+
+  /// Initialize emergency management and database listeners
+  Future<void> _initializeEmergencyManagement() async {
+    try {
+      // Initialize emergency management service
+      await EmergencyManagementService.initialize();
+      
+      // CRITICAL: Clean up any stale/duplicate emergencies for the current user
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId != null) {
+        AppLogger.logInfo('Cleaning up stale emergencies for user: $userId');
+        await EmergencyDatabaseService.cleanupUserEmergencies(userId);
+      }
+      
+      // Cancel any existing subscription to prevent memory leaks
+      _emergenciesSubscription?.cancel();
+      
+      // Listen to emergencies based on user role
+      AppLogger.logInfo('Setting up emergency listeners for role: $_userRole');
+      
+      if (_userRole?.toLowerCase() == 'volunteer') {
+        // VOLUNTEERS see ALL emergencies from ALL groups - Use same approach as attendees but for all groups
+        AppLogger.logInfo('Volunteer detected - listening to ALL group emergencies without indexes');
+        await _listenToAllGroupEmergenciesForVolunteers();
+      } else {
+        // ATTENDEES and ORGANIZERS see only their group emergencies
+        AppLogger.logInfo('Non-volunteer (${_userRole ?? 'Unknown'}) detected - listening to group ${widget.groupId} emergencies only');
+        _emergenciesSubscription = EmergencyManagementService.listenToGroupEmergencies(
+          widget.groupId,
+          (emergencies) {
+            if (!mounted) return;
+            
+            AppLogger.logInfo('Group received ${emergencies.length} emergencies: ${emergencies.map((e) => '${e.attendeeName} (${e.emergencyId})').join(', ')}');
+            
+            setState(() {
+              _activeEmergencies = emergencies;
+              
+              // CRITICAL: Restore emergency state for attendees across login/logout
+              if (_userRole == 'Attendee') {
+                final userId = FirebaseAuth.instance.currentUser?.uid;
+                final hasActiveEmergency = emergencies.any((emergency) => 
+                  emergency.attendeeId == userId && emergency.status == EmergencyStatus.active);
+                
+                if (_isEmergency != hasActiveEmergency) {
+                  _isEmergency = hasActiveEmergency;
+                  _locationManager.isEmergency = hasActiveEmergency;
+                  _locationManager.updateEmergencyStatus(hasActiveEmergency);
+                  
+                  AppLogger.logInfo('Emergency state restored from database: $_isEmergency');
+                }
+              }
+            });
+            
+            AppLogger.logInfo('Group emergency data updated: ${emergencies.length} active emergencies in group ${widget.groupId}');
+          },
+        );
+      }
+      
+      // Add error handling for the subscription
+      _emergenciesSubscription?.onError((error) {
+        AppLogger.logError('Emergency subscription error', error);
+        
+        // Handle the specific Firebase index error
+        if (error.toString().contains('requires an index')) {
+          AppLogger.logError('Firebase index required for emergency queries. Please create the index in Firebase Console.');
+          
+          if (mounted) {
+            _showTopSnackBar(
+              message: '⚠️ Database setup required. Please contact administrator.',
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 5),
+              icon: const Icon(Icons.warning, color: Colors.white),
+            );
+          }
+        }
+        
+        // Attempt to reconnect after 5 seconds
+        Future.delayed(const Duration(seconds: 5), () {
+          if (mounted) {
+            AppLogger.logInfo('Attempting to reconnect to emergency stream...');
+            _initializeEmergencyManagement();
+          }
+        });
+      });
+      
+      // Disable old emergency manager listeners to prevent conflicts
+      // _emergencyManager.dispose(); // REMOVED - No longer using old UserLocation-based system
+      
+      AppLogger.logInfo('Emergency management initialized - Role: $_userRole, listening to ${_userRole == 'Volunteer' ? 'ALL' : 'GROUP'} emergencies');
+    } catch (e) {
+      AppLogger.logError('Error initializing emergency management', e);
+      
+      // Retry initialization after a delay
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) {
+          AppLogger.logInfo('Retrying emergency management initialization...');
+          _initializeEmergencyManagement();
+        }
+      });
+    }
+  }
+
+  /// Listen to all group emergencies for volunteers (avoiding Firebase indexes)
+  Future<void> _listenToAllGroupEmergenciesForVolunteers() async {
+    try {
+      // Get all groups first
+      final groupsSnapshot = await FirebaseFirestore.instance
+          .collection('groups')
+          .get();
+
+      List<StreamSubscription<List<Emergency>>> groupSubscriptions = [];
+
+      // Listen to each group's emergencies separately (same method attendees use)
+      for (final groupDoc in groupsSnapshot.docs) {
+        final groupId = groupDoc.id;
+        AppLogger.logInfo('Volunteer listening to group: $groupId');
+        
+        // Use the same method that works for attendees - EmergencyManagementService.listenToGroupEmergencies
+        final subscription = EmergencyManagementService.listenToGroupEmergencies(
+          groupId,
+          (groupEmergencies) {
+            if (!mounted) return;
+            
+            try {
+              AppLogger.logInfo('Volunteer received ${groupEmergencies.length} emergencies from group $groupId');
+              
+              // Update the combined list of emergencies
+              setState(() {
+                // Remove old emergencies from this group and add new ones
+                _activeEmergencies = _activeEmergencies
+                    .where((emergency) => emergency.groupId != groupId)
+                    .toList();
+                _activeEmergencies.addAll(groupEmergencies);
+                
+                // Sort by creation time (newest first)
+                _activeEmergencies.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+              });
+              
+              // Show notifications for new emergencies
+              _handleNewEmergencyNotifications(groupEmergencies);
+              
+              AppLogger.logInfo('Volunteer total active emergencies: ${_activeEmergencies.length}');
+            } catch (e) {
+              AppLogger.logError('Error processing emergencies for group $groupId', e);
+            }
+          },
+        );
+        
+        groupSubscriptions.add(subscription);
+      }
+
+      // Store the subscription for cleanup (we'll use the first one as the main subscription)
+      if (groupSubscriptions.isNotEmpty) {
+        _emergenciesSubscription = groupSubscriptions.first;
+        
+        // Store additional subscriptions for cleanup
+        _additionalEmergencySubscriptions = groupSubscriptions.skip(1).toList();
+      }
+      
+      AppLogger.logInfo('Volunteer listening to ${groupsSnapshot.docs.length} groups for emergencies');
+    } catch (e) {
+      AppLogger.logError('Error setting up volunteer emergency listening', e);
+      
+      // Fallback to single group listening if there's an error
+      if (mounted) {
+        _emergenciesSubscription = EmergencyManagementService.listenToGroupEmergencies(
+          widget.groupId,
+          (emergencies) {
+            if (!mounted) return;
+            
+            setState(() {
+              _activeEmergencies = emergencies;
+            });
+            
+            _handleNewEmergencyNotifications(emergencies);
+            
+            AppLogger.logInfo('Volunteer fallback - listening to current group only: ${emergencies.length} emergencies');
+          },
+        );
+      }
+    }
+  }
+
+  /// Handle new emergency notifications for volunteers
+  void _handleNewEmergencyNotifications(List<Emergency> emergencies) {
+    // Track which emergencies we've already notified about
+    for (final emergency in emergencies) {
+      if (!_notifiedEmergencies.contains(emergency.emergencyId)) {
+        _notifiedEmergencies.add(emergency.emergencyId);
+        
+        // Show notification for this emergency
+        _showTopSnackBar(
+          message: '🚨 Emergency: ${emergency.attendeeName} needs assistance!',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 8),
+          icon: const Icon(Icons.warning, color: Colors.white),
+          action: SnackBarAction(
+            label: 'RESPOND',
+            textColor: Colors.white,
+            onPressed: () async {
+              await _handleEmergencyResponseFromDatabase(emergency);
+            },
+          ),
+        );
+      }
+    }
+    
+    // Clean up notifications for resolved emergencies
+    _notifiedEmergencies.removeWhere((id) => 
+        !emergencies.any((emergency) => emergency.emergencyId == id));
+  }
+
+  /// Handle volunteer responding to database emergency
+  Future<void> _handleEmergencyResponseFromDatabase(Emergency emergency) async {
+    // Show EmergencyResponseCard for volunteers to respond
+    if (_userRole == 'Volunteer' && 
+        !emergency.responses.containsKey(FirebaseAuth.instance.currentUser?.uid)) {
+      
+      setState(() {
+        _currentEmergencyResponse = emergency;
+      });
+      
+      // Focus map on emergency location
+      _mapController.move(emergency.location, 16.0);
+      
+      // Show notification to volunteer
+      if (mounted) {
+        _showTopSnackBar(
+          message: '🚨 New emergency alert! Respond to help.',
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 4),
+          icon: const Icon(Icons.emergency, color: Colors.white),
+        );
+      }
+    }
   }
 
   Future<void> _setupInitialData() async {
@@ -94,6 +340,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _listenToGroupLocations();
     _listenToPOIs();
     _startEmergencyListeners();
+    // Initialize emergency management AFTER user role is fetched
+    await _initializeEmergencyManagement();
   }
 
   Future<void> _getUserRole() async {
@@ -194,157 +442,137 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   void _startEmergencyListeners() {
-    _emergencyManager.listenToEmergencies(() {
-      if (mounted) {
-        setState(() {
-          // Force rebuild to update emergency markers
-        });
-      }
-    });
+    // UNIFIED EMERGENCY SYSTEM: Only use Emergency objects via EmergencyManagementService
+    // Emergency notifications are handled by _initializeEmergencyManagement via _handleNewEmergencyNotifications
     
-    _emergencyManager.listenToNearbyVolunteers(
-      _locationManager.currentLocation,
-      () {
-        if (mounted) {
-          setState(() {
-            // Force rebuild to update volunteer locations
-          });
-        }
-      },
-    );
-    
-    _emergencyManager.listenToAllVolunteers(() {
-      if (mounted) {
-        setState(() {
-          // Force rebuild to update all volunteer locations
-        });
-      }
-    });
-
-    // Listen for new emergencies and show in-app notifications
-    if (_userRole == 'Volunteer' || _userRole == 'Organizer') {
-      _listenForNewEmergencies();
-    }
-  }
-
-  /// Listen for new emergencies and show in-app notifications to volunteers
-  void _listenForNewEmergencies() {
-    final Set<String> knownEmergencies = {};
-    
-    // Initialize known emergencies from current state
-    for (final member in _groupMembers) {
-      if (member.isEmergency) {
-        knownEmergencies.add(member.userId);
-      }
-    }
-    
-    FirebaseFirestore.instance
-        .collectionGroup('locations')
-        .where('isEmergency', isEqualTo: true)
-        .snapshots()
-        .listen((snapshot) {
-      for (final docChange in snapshot.docChanges) {
-        if (docChange.type == DocumentChangeType.added) {
-          final emergency = UserLocation.fromMap(docChange.doc.data()!);
-          
-          // Don't notify about our own emergency or already known ones
-          if (emergency.userId == FirebaseAuth.instance.currentUser?.uid ||
-              knownEmergencies.contains(emergency.userId)) {
-            continue;
-          }
-          
-          knownEmergencies.add(emergency.userId);
-          
-          // Force map rebuild to show new emergency marker
-          if (mounted) {
-            setState(() {
-              // This will trigger a rebuild and show the new emergency marker
-            });
-            
-            // Show in-app notification
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Row(
-                  children: [
-                    const Icon(Icons.warning, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '🚨 Emergency: ${emergency.userName} needs assistance!',
-                        style: const TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: Colors.red,
-                duration: const Duration(seconds: 5),
-                action: SnackBarAction(
-                  label: 'VIEW',
-                  textColor: Colors.white,
-                  onPressed: () {
-                    // Center map on emergency location
-                    _mapController.move(
-                      LatLng(emergency.latitude, emergency.longitude),
-                      16.0,
-                    );
-                  },
-                ),
-              ),
-            );
-          }
-        } else if (docChange.type == DocumentChangeType.removed) {
-          final emergency = UserLocation.fromMap(docChange.doc.data()!);
-          knownEmergencies.remove(emergency.userId);
-          
-          // Force map rebuild to remove emergency marker
-          if (mounted) {
-            setState(() {
-              // This will trigger a rebuild and hide the resolved emergency marker
-            });
-            
-            // Show emergency resolved notification
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('✅ Emergency resolved: ${emergency.userName}'),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          }
-        }
-      }
-    });
+    // Note: Old UserLocation-based emergency system has been completely removed
+    // All emergency functionality now uses the Emergency object model for consistency
   }
 
   Future<void> _toggleEmergency() async {
     // Only allow attendees to toggle emergency
     if (_userRole != 'Attendee') return;
     
-    final shouldActivate = _isEmergency ? true : await showEmergencyConfirmationDialog(context);
-    if (!shouldActivate) return;
-    
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+
     try {
-      await _emergencyManager.toggleEmergency(
-        currentEmergencyStatus: _isEmergency,
-        currentLocation: _locationManager.currentLocation,
-        onEmergencyChanged: (newStatus) {
+      if (!_isEmergency) {
+        // STRICT ENFORCEMENT: Check for existing emergency before creating
+        AppLogger.logInfo('Checking for existing emergency before creation...');
+        final existingEmergency = await EmergencyDatabaseService.getUserActiveEmergency(userId);
+        if (existingEmergency != null) {
+          AppLogger.logWarning('BLOCKED: User $userId already has active emergency: ${existingEmergency.emergencyId}');
+          
+          // Update UI state to reflect existing emergency
           setState(() {
-            _isEmergency = newStatus;
-            _locationManager.isEmergency = newStatus;
+            _isEmergency = true;
+            _locationManager.isEmergency = true;
           });
-        },
-        context: context,
-      );
-      
-      // Update location with new emergency status immediately
-      if (_locationManager.currentLocation != null) {
-        await _updateUserLocation(_locationManager.currentLocation!);
+          _locationManager.updateEmergencyStatus(true);
+          
+          if (mounted) {
+            _showTopSnackBar(
+              message: '🚨 You already have an active emergency! Only one emergency per user allowed.',
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 4),
+              icon: const Icon(Icons.block, color: Colors.white),
+            );
+          }
+          return; // HARD STOP - Don't create a new emergency
+        }
+
+        // CREATING NEW EMERGENCY - Unified system
+        if (_locationManager.currentLocation == null) {
+          throw Exception('Location not available');
+        }
+        
+        final currentLocation = LatLng(
+          _locationManager.currentLocation!.latitude!,
+          _locationManager.currentLocation!.longitude!,
+        );
+        
+        // Create emergency using unified system
+        final emergency = await EmergencyDatabaseService.createEmergencyWithState(
+          attendeeId: userId,
+          attendeeName: FirebaseAuth.instance.currentUser?.displayName ?? 'Unknown User',
+          groupId: widget.groupId,
+          location: currentLocation,
+          message: null,
+        );
+        
+        // Update local state and location manager
+        setState(() {
+          _isEmergency = true;
+          _locationManager.isEmergency = true;
+        });
+        
+        // Update location manager for enhanced tracking
+        _locationManager.updateEmergencyStatus(true);
+        
+        if (mounted) {
+          _showTopSnackBar(
+            message: '🚨 Emergency activated! Volunteers have been notified.',
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+            icon: const Icon(Icons.emergency, color: Colors.white),
+          );
+        }
+        
+        AppLogger.logInfo('Emergency created with unified system: ${emergency.emergencyId}');
+        
+      } else {
+        // RESOLVING EXISTING EMERGENCY - Enhanced cleanup
+        // Find current user's emergency in active emergencies
+        final userId = FirebaseAuth.instance.currentUser?.uid;
+        if (userId != null) {
+          final userEmergency = _activeEmergencies.firstWhere(
+            (emergency) => emergency.attendeeId == userId,
+            orElse: () => Emergency(
+              emergencyId: '',
+              attendeeId: '',
+              attendeeName: '',
+              groupId: '',
+              location: const LatLng(0, 0),
+              status: EmergencyStatus.resolved,
+              createdAt: DateTime.now(),
+              updatedAt: DateTime.now(),
+              responses: {},
+              resolvedBy: const EmergencyResolution(attendee: false, hasVolunteerCompleted: false),
+            ),
+          );
+          
+          if (userEmergency.emergencyId.isNotEmpty) {
+            // Resolve emergency with complete cleanup
+            await EmergencyManagementService.resolveEmergency(userEmergency.emergencyId);
+          }
+        }
+        
+        // Update local state and location manager
+        setState(() {
+          _isEmergency = false;
+          _locationManager.isEmergency = false;
+        });
+        
+        // Update location manager to normal tracking
+        _locationManager.updateEmergencyStatus(false);
+        
+        if (mounted) {
+          _showTopSnackBar(
+            message: '✅ Emergency resolved! Thank you for your safety.',
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+            icon: const Icon(Icons.check_circle, color: Colors.white),
+          );
+        }
       }
       
-      // Force refresh of all listeners to ensure immediate updates
-      setState(() {
-        // This will trigger a complete rebuild with new emergency status
-      });
+      // Force refresh to update UI
+      if (mounted) {
+        setState(() {
+          // This will trigger a complete rebuild with new emergency status
+        });
+      }
       
     } catch (e) {
       if (mounted) {
@@ -385,21 +613,30 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     });
 
     // Show instructions to user
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          _isMarkerManagementMode 
-              ? 'Tap markers to manage them' 
-              : 'Marker management disabled',
-        ),
-        duration: const Duration(seconds: 2),
+    _showTopSnackBar(
+      message: _isMarkerManagementMode 
+          ? 'Tap markers to manage them' 
+          : 'Marker management disabled',
+      backgroundColor: Colors.blue,
+      duration: const Duration(seconds: 2),
+      icon: Icon(
+        _isMarkerManagementMode ? Icons.edit : Icons.visibility_off,
+        color: Colors.white,
       ),
     );
   }
 
   void _onUserMarkerTap(UserLocation user) {
+    // Normal behavior: select for routing
+    // Emergency responses are now handled via the database emergency markers only
     setState(() => _selectedMember = user);
     _calculateRoute();
+  }
+
+  void _onUserMarkerLongPress(UserLocation user) {
+    // For user markers, fall back to regular tap behavior
+    // Emergency responses are now handled via the database emergency markers only
+    _onUserMarkerTap(user);
   }
 
   void _onPOITap(POI poi) {
@@ -624,11 +861,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       _isPlacingPOI = true;
     });
     
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Tap on the map to place a POI'),
-        duration: Duration(seconds: 3),
-      ),
+    _showTopSnackBar(
+      message: 'Tap on the map to place a POI',
+      backgroundColor: Colors.blue,
+      duration: const Duration(seconds: 3),
+      icon: const Icon(Icons.add_location, color: Colors.white),
     );
   }
 
@@ -702,8 +939,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             ElevatedButton(
               onPressed: () async {
                 if (poiName.trim().isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Please enter a POI name')),
+                  _showTopSnackBar(
+                    message: 'Please enter a POI name',
+                    backgroundColor: Colors.orange,
+                    duration: const Duration(seconds: 2),
+                    icon: const Icon(Icons.warning, color: Colors.white),
                   );
                   return;
                 }
@@ -743,15 +983,21 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           .set(poi.toMap());
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${type.displayName} created successfully')),
+        _showTopSnackBar(
+          message: '${type.displayName} created successfully',
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
+          icon: const Icon(Icons.check_circle, color: Colors.white),
         );
       }
     } catch (e) {
       debugPrint('Error creating POI: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error creating POI: $e')),
+        _showTopSnackBar(
+          message: 'Error creating POI: $e',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
         );
       }
     }
@@ -823,8 +1069,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       AppLogger.logInfo('MapScreen disposing resources');
       _groupLocationsSubscription?.cancel();
       _poisSubscription?.cancel();
+      _emergenciesSubscription?.cancel();
+      
+      // Cancel additional emergency subscriptions for volunteers
+      for (final subscription in _additionalEmergencySubscriptions) {
+        subscription.cancel();
+      }
+      _additionalEmergencySubscriptions.clear();
+      
       _locationManager.dispose();
-      _emergencyManager.dispose();
+      // REMOVED: _emergencyManager.dispose() - using EmergencyManagementService instead
+      EmergencyManagementService.dispose();
       _mapController.dispose();
       AppLogger.logInfo('MapScreen resources disposed successfully');
     } catch (e) {
@@ -889,7 +1144,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 tileProvider: NetworkTileProvider(),
                 subdomains: const ['a', 'b', 'c', 'd'],
               ),
-              // Current location circle
+              // Current location circle (lowest priority - should be underneath everything)
               if (_locationManager.currentLocation != null)
                 CircleLayer(
                   circles: [
@@ -908,16 +1163,37 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     ),
                   ],
                 ),
-              // User markers with clustering
+              // Route polylines (before markers for better visibility)
+              if (_currentRoute.isNotEmpty)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _currentRoute,
+                      color: AppColors.primary,
+                      strokeWidth: 4,
+                      pattern: const StrokePattern.dotted(),
+                    ),
+                  ],
+                ),
+              // POI markers (medium priority)
+              MarkerLayer(
+                markers: _markerManager.buildPOIMarkers(
+                  pois: _pois,
+                  onPOITap: _onPOITap,
+                  onPOILongPress: _onPOILongPress,
+                ),
+              ),
+              // User markers with clustering (higher priority than POI)
               MarkerClusterLayerWidget(
                 options: MarkerClusterLayerOptions(
                   markers: _markerManager.buildMarkers(
                     groupMembers: _groupMembers,
-                    emergencies: _emergencyManager.emergencies,
-                    nearbyVolunteers: _emergencyManager.nearbyVolunteers,
-                    allVolunteers: _emergencyManager.allVolunteers,
+                    activeEmergencies: _activeEmergencies, // Pass active emergencies to avoid duplicates
+                    nearbyVolunteers: [], // Disable old system
+                    allVolunteers: [], // Disable old system
                     currentLocation: _locationManager.currentLocation,
                     onUserMarkerTap: _onUserMarkerTap,
+                    onUserMarkerLongPress: _onUserMarkerLongPress,
                   ),
                   builder: (context, markers) {
                     return Container(
@@ -938,26 +1214,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   },
                 ),
               ),
-              // POI markers (no clustering)
+              // Emergency markers (HIGHEST PRIORITY - Always on top)
               MarkerLayer(
-                markers: _markerManager.buildPOIMarkers(
-                  pois: _pois,
-                  onPOITap: _onPOITap,
-                  onPOILongPress: _onPOILongPress,
-                ),
+                markers: _buildEmergencyMarkers(),
               ),
-              // Route polyline
-              if (_currentRoute.isNotEmpty)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: _currentRoute,
-                      color: AppColors.primary,
-                      strokeWidth: 4,
-                      pattern: const StrokePattern.dotted(),
-                    ),
-                  ],
-                ),
             ],
           ),
           
@@ -990,7 +1250,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               children: [
                 // Broadcast button (always visible)
                 _buildBroadcastButton(),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12), // Increased spacing
                 
                 // POI Creation button (Organizers only)
                 if (_userRole == 'Organizer' && !_isPlacingPOI) ...[
@@ -1000,7 +1260,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     backgroundColor: AppColors.secondary,
                     child: const Icon(Icons.add_location, size: 24),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
                   // Marker management button
                   FloatingActionButton(
                     heroTag: "marker_management",
@@ -1012,14 +1272,43 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       size: 24,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
                 ],
                 
                 // Emergency button (Attendees only)
                 if (_userRole == 'Attendee') ...[
                   FloatingActionButton(
                     heroTag: "emergency",
-                    onPressed: _toggleEmergency,
+                    onPressed: () async {
+                      if (_isEmergency) {
+                        // Show resolve dialog for active emergencies
+                        final shouldResolve = await showDialog<bool>(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('🟢 Resolve Emergency'),
+                            content: const Text('Mark this emergency as resolved?\n\nThis will notify all volunteers that you are safe.'),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.of(context).pop(false),
+                                child: const Text('Cancel'),
+                              ),
+                              ElevatedButton(
+                                onPressed: () => Navigator.of(context).pop(true),
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+                                child: const Text('✅ Resolve Emergency'),
+                              ),
+                            ],
+                          ),
+                        );
+                        
+                        if (shouldResolve == true) {
+                          await _resolveEmergency(FirebaseAuth.instance.currentUser!.uid);
+                        }
+                      } else {
+                        // Normal emergency activation
+                        await _toggleEmergency();
+                      }
+                    },
                     backgroundColor: _isEmergency ? AppColors.mapEmergency : AppColors.surface,
                     foregroundColor: _isEmergency ? Colors.white : AppColors.mapEmergency,
                     child: Icon(
@@ -1027,9 +1316,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       size: 28,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
                 ],
-                // Location button
+                // Location button (always visible)
                 FloatingActionButton(
                   heroTag: "location",
                   onPressed: _getCurrentLocation,
@@ -1039,6 +1328,65 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               ],
             ),
           ),
+          
+          // Emergency Response Card for Volunteers - Connected to Database
+          // Positioned with better spacing and responsiveness
+          if (_userRole == 'Volunteer' && _currentEmergencyResponse != null)
+            Positioned(
+              bottom: MediaQuery.of(context).size.height * 0.15, // Responsive positioning
+              left: 16,
+              right: MediaQuery.of(context).size.width * 0.25, // Leave more space for FABs
+              child: Container(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.3, // Prevent card from being too tall
+                ),
+                child: EmergencyResponseCard(
+                  emergency: _currentEmergencyResponse,
+                  response: EmergencyResponse(
+                    responseId: '${_currentEmergencyResponse!.emergencyId}_${FirebaseAuth.instance.currentUser?.uid ?? ''}',
+                    emergencyId: _currentEmergencyResponse!.emergencyId,
+                    volunteerId: FirebaseAuth.instance.currentUser?.uid ?? '',
+                    volunteerName: FirebaseAuth.instance.currentUser?.displayName ?? 'Unknown Volunteer',
+                    status: _getCurrentVolunteerStatus(_currentEmergencyResponse!),
+                    timestamp: _currentEmergencyResponse!.createdAt,
+                    lastUpdated: _currentEmergencyResponse!.updatedAt,
+                    volunteerLocation: _locationManager.currentLocation?.latitude != null && 
+                                       _locationManager.currentLocation?.longitude != null
+                        ? LatLng(_locationManager.currentLocation!.latitude!, _locationManager.currentLocation!.longitude!)
+                        : null,
+                    notes: _currentEmergencyResponse!.message,
+                  ),
+                  onStatusUpdate: (status) async {
+                    if (_currentEmergencyResponse != null) {
+                      await _updateVolunteerResponseStatus(_currentEmergencyResponse!, status);
+                      
+                      // If volunteer marked as completed, clear the current response
+                      if (status == EmergencyResponseStatus.completed && mounted) {
+                        setState(() {
+                          _currentEmergencyResponse = null;
+                        });
+                      }
+                    }
+                  },
+                  onCancel: () async {
+                    if (_currentEmergencyResponse != null && FirebaseAuth.instance.currentUser != null) {
+                      await EmergencyDatabaseService.removeVolunteerResponse(
+                        emergencyId: _currentEmergencyResponse!.emergencyId,
+                        volunteerId: FirebaseAuth.instance.currentUser!.uid,
+                      );
+                      setState(() {
+                        _currentEmergencyResponse = null;
+                      });
+                    }
+                  },
+                  onViewEmergency: () {
+                    if (_currentEmergencyResponse != null) {
+                      _focusOnLocation(_currentEmergencyResponse!.location);
+                    }
+                  },
+                ),
+              ),
+            ),
           
           // Role info
           Positioned(
@@ -1068,5 +1416,629 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
+  /// Helper method to show SnackBar at the top of the screen
+  void _showTopSnackBar({
+    required String message,
+    required Color backgroundColor,
+    Duration duration = const Duration(seconds: 3),
+    Widget? icon,
+    SnackBarAction? action,
+  }) {
+    if (!mounted) return;
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            if (icon != null) ...[
+              icon,
+              const SizedBox(width: 8),
+            ],
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: backgroundColor,
+        duration: duration,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(
+          top: 120, // Increased from 80 to avoid role info card
+          left: 16,
+          right: 16,
+          bottom: 16,
+        ),
+        action: action,
+      ),
+    );
+  }
+
+  /// Update volunteer response status using new emergency system
+  Future<void> _updateVolunteerResponseStatus(Emergency emergency, EmergencyResponseStatus newStatus) async {
+    try {
+      // Update volunteer status in the new emergency database
+      await _handleVolunteerResponseUpdate(emergency, newStatus);
+      
+      // If volunteer marks as completed, automatically resolve the attendee's emergency
+      if (newStatus == EmergencyResponseStatus.completed) {
+        // Mark volunteer response as completed in the emergency
+        final userId = FirebaseAuth.instance.currentUser?.uid;
+        if (userId != null) {
+          await EmergencyManagementService.updateVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            status: EmergencyVolunteerStatus.completed,
+          );
+          
+          // Clear current emergency response
+          setState(() {
+            _currentEmergencyResponse = null;
+          });
+        }
+      }
+      
+      // Show confirmation message
+      if (mounted) {
+        _showTopSnackBar(
+          message: '✅ Status updated to: ${newStatus.displayName}',
+          backgroundColor: newStatus.statusColor,
+          duration: const Duration(seconds: 2),
+          icon: const Icon(Icons.update, color: Colors.white),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        _showTopSnackBar(
+          message: '❌ Failed to update status: $e',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+      }
+    }
+  }
+
+  /// Handle emergency resolution - called by both attendees and volunteers
+  Future<void> _resolveEmergency(String emergencyId) async {
+    try {
+      if (_userRole == 'Attendee') {
+        // Attendee resolving their own emergency using new system
+        final userId = FirebaseAuth.instance.currentUser?.uid;
+        if (userId != null) {
+          // Find current user's emergency in active emergencies
+          final userEmergency = _activeEmergencies.firstWhere(
+            (emergency) => emergency.attendeeId == userId,
+            orElse: () => Emergency(
+              emergencyId: '',
+              attendeeId: '',
+              attendeeName: '',
+              groupId: '',
+              location: const LatLng(0, 0),
+              status: EmergencyStatus.resolved,
+              createdAt: DateTime.now(),
+              updatedAt: DateTime.now(),
+              responses: {},
+              resolvedBy: const EmergencyResolution(attendee: false, hasVolunteerCompleted: false),
+            ),
+          );
+          
+          if (userEmergency.emergencyId.isNotEmpty) {
+            // Resolve emergency using new system
+            await EmergencyManagementService.resolveEmergency(userEmergency.emergencyId);
+            
+            // Update local state
+            setState(() {
+              _isEmergency = false;
+              _locationManager.isEmergency = false;
+            });
+            
+            // Update location manager to normal tracking
+            _locationManager.updateEmergencyStatus(false);
+          }
+        }
+        
+        if (mounted) {
+          _showTopSnackBar(
+            message: '✅ Emergency resolved! Thank you for your safety.',
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+            icon: const Icon(Icons.check_circle, color: Colors.white),
+          );
+        }
+      } else if (_userRole == 'Volunteer' && _currentEmergencyResponse != null) {
+        // Volunteer marking emergency as completed - use new system
+        await _updateVolunteerResponseStatus(_currentEmergencyResponse!, EmergencyResponseStatus.completed);
+        
+        // Check if attendee has also resolved the emergency
+        await _checkAndCleanupResolvedEmergency(emergencyId);
+      }
+      
+      // Force refresh of emergency data
+      if (mounted) {
+        setState(() {
+          // This will trigger a rebuild and update emergency status
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        _showTopSnackBar(
+          message: '❌ Failed to resolve emergency: $e',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+      }
+    }
+  }
+
+  /// Check if emergency is resolved by both sides and clean up database  
+  Future<void> _checkAndCleanupResolvedEmergency(String emergencyId) async {
+    try {
+      // Use the new emergency system to check resolution status
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) return;
+      
+      // Check if emergency is resolved
+      final isResolved = emergency.status == EmergencyStatus.resolved;
+      
+      // Check if volunteer has completed their response
+      final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+      final volunteerCompleted = currentUserId != null && 
+          emergency.responses.containsKey(currentUserId) &&
+          emergency.responses[currentUserId]?.status == EmergencyVolunteerStatus.completed;
+      
+      if (isResolved && volunteerCompleted) {
+        // Both sides have resolved - clean up is handled by EmergencyManagementService
+        if (mounted) {
+          _showTopSnackBar(
+            message: '🎉 Emergency fully resolved and cleaned up!',
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+            icon: const Icon(Icons.celebration, color: Colors.white),
+          );
+        }
+      }
+    } catch (e) {
+      // Log error but don't show to user as this is background cleanup
+      AppLogger.logError('Error checking emergency resolution status', e);
+    }
+  }
+
   // Top navigation AppBar removed per new UI. Helper methods were deleted.
+
+  /// Get current volunteer's response status for an emergency
+  EmergencyResponseStatus _getCurrentVolunteerStatus(Emergency emergency) {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) return EmergencyResponseStatus.notified;
+
+    final response = emergency.responses[currentUserId];
+    if (response == null) return EmergencyResponseStatus.notified;
+
+    switch (response.status) {
+      case EmergencyVolunteerStatus.responding:
+        return EmergencyResponseStatus.enRoute;
+      case EmergencyVolunteerStatus.arrived:
+        return EmergencyResponseStatus.arrived;
+      case EmergencyVolunteerStatus.completed:
+        return EmergencyResponseStatus.completed;
+      default:
+        return EmergencyResponseStatus.notified;
+    }
+  }
+
+  /// Handle volunteer response status updates
+  Future<void> _handleVolunteerResponseUpdate(Emergency emergency, EmergencyResponseStatus status) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+
+    try {
+      // Get current location if available
+      LatLng? currentLocation;
+      final locationData = _locationManager.currentLocation;
+      if (locationData?.latitude != null && locationData?.longitude != null) {
+        currentLocation = LatLng(locationData!.latitude!, locationData.longitude!);
+      }
+
+      switch (status) {
+        case EmergencyResponseStatus.responding:
+        case EmergencyResponseStatus.enRoute:
+          if (currentLocation != null) {
+            await EmergencyManagementService.volunteerRespond(
+              emergencyId: emergency.emergencyId,
+              volunteerName: currentUser.displayName ?? 'Unknown Volunteer',
+              volunteerLocation: currentLocation,
+            );
+          }
+          break;
+
+        case EmergencyResponseStatus.arrived:
+          await EmergencyManagementService.updateVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            status: EmergencyVolunteerStatus.arrived,
+          );
+          break;
+
+        case EmergencyResponseStatus.completed:
+          await EmergencyManagementService.updateVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            status: EmergencyVolunteerStatus.completed,
+          );
+          break;
+
+        case EmergencyResponseStatus.unavailable:
+          // Remove volunteer response from database
+          await EmergencyDatabaseService.removeVolunteerResponse(
+            emergencyId: emergency.emergencyId,
+            volunteerId: currentUser.uid,
+          );
+          break;
+
+        default:
+          break;
+      }
+
+      // Show success feedback
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_getStatusUpdateMessage(status)),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error updating volunteer response: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to update response: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Get user-friendly status update message
+  String _getStatusUpdateMessage(EmergencyResponseStatus status) {
+    switch (status) {
+      case EmergencyResponseStatus.responding:
+      case EmergencyResponseStatus.enRoute:
+        return 'Response confirmed - heading to emergency';
+      case EmergencyResponseStatus.arrived:
+        return 'Arrival confirmed at emergency location';
+      case EmergencyResponseStatus.completed:
+        return 'Emergency response completed successfully';
+      case EmergencyResponseStatus.unavailable:
+        return 'Emergency response cancelled';
+      default:
+        return 'Status updated';
+    }
+  }
+
+  /// Focus map on a specific location
+  void _focusOnLocation(LatLng location) {
+    _mapController.move(location, 16.0);
+  }
+
+  /// Build emergency markers for the map with maximum visual priority
+  List<Marker> _buildEmergencyMarkers() {
+    List<Marker> emergencyMarkers = [];
+    
+    AppLogger.logInfo('Building emergency markers: ${_activeEmergencies.length} active emergencies, user role: $_userRole');
+
+    for (final emergency in _activeEmergencies) {
+      AppLogger.logInfo('Processing emergency: ${emergency.attendeeName} (${emergency.emergencyId}), status: ${emergency.status.name}');
+      
+      // Skip resolved emergencies
+      if (emergency.status == EmergencyStatus.resolved) {
+        AppLogger.logInfo('Skipping resolved emergency: ${emergency.emergencyId}');
+        continue;
+      }
+
+      // Use larger size for emergency markers to ensure visibility
+      final baseMarkerSize = _markerManager.getGeographicMarkerSize(
+        markerPosition: emergency.location,
+        geoMarkerType: geo.MarkerType.emergency,
+        minPixelSize: 40.0, // Increased minimum size
+        maxPixelSize: 80.0, // Increased maximum size
+      );
+      
+      // Add additional size boost for emergency markers
+      final markerSize = (baseMarkerSize * 1.2).clamp(40.0, 90.0);
+      final iconSize = (markerSize * 0.6).clamp(20.0, 36.0);
+      final pulseSize = markerSize * 1.5; // For pulsing animation
+
+      // Create emergency marker with maximum visual prominence
+      emergencyMarkers.add(
+        Marker(
+          point: emergency.location,
+          width: pulseSize, // Use larger size for pulsing effect
+          height: pulseSize,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Pulsing background ring for animation
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 1000),
+                curve: Curves.easeInOut,
+                width: pulseSize,
+                height: pulseSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _getEmergencyMarkerColor(emergency).withOpacity(0.3),
+                  border: Border.all(
+                    color: _getEmergencyMarkerColor(emergency).withOpacity(0.6),
+                    width: 2.0,
+                  ),
+                ),
+              ),
+              // Main emergency marker
+              GestureDetector(
+                onTap: () => _onEmergencyMarkerTap(emergency),
+                onLongPress: () => _onEmergencyMarkerLongPress(emergency),
+                child: Container(
+                  width: markerSize,
+                  height: markerSize,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: _getEmergencyMarkerColor(emergency),
+                    border: Border.all(
+                      color: Colors.white, 
+                      width: 4.0, // Thick white border for contrast
+                    ),
+                    boxShadow: [
+                      // Multiple shadows for maximum visibility
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.5),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                      BoxShadow(
+                        color: _getEmergencyMarkerColor(emergency).withOpacity(0.3),
+                        blurRadius: 20,
+                        offset: const Offset(0, 0),
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    Icons.emergency,
+                    color: Colors.white,
+                    size: iconSize,
+                    shadows: const [
+                      Shadow(
+                        color: Colors.black54,
+                        offset: Offset(1, 1),
+                        blurRadius: 2,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+      
+      AppLogger.logInfo('Created emergency marker for: ${emergency.attendeeName} at ${emergency.location}');
+    }
+
+    AppLogger.logInfo('Emergency markers built: ${emergencyMarkers.length} markers created');
+    return emergencyMarkers;
+  }
+
+  /// Get appropriate color for emergency marker based on status
+  Color _getEmergencyMarkerColor(Emergency emergency) {
+    final hasVolunteers = emergency.responses.isNotEmpty;
+    
+    switch (emergency.status) {
+      case EmergencyStatus.active:
+        return hasVolunteers ? Colors.orange : Colors.red;
+      case EmergencyStatus.inProgress:
+        return Colors.blue;
+      case EmergencyStatus.resolved:
+        return Colors.green;
+    }
+  }
+
+  /// Handle emergency marker tap
+  void _onEmergencyMarkerTap(Emergency emergency) {
+    // Focus on emergency location
+    _focusOnLocation(emergency.location);
+
+    // Show emergency info
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.emergency,
+                  color: _getEmergencyMarkerColor(emergency),
+                  size: 32,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Emergency Alert',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        emergency.attendeeName,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            if (emergency.message != null) ...[
+              Text(
+                'Message:',
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(emergency.message!),
+              const SizedBox(height: 16),
+            ],
+            Text(
+              'Status: ${emergency.status.name.toUpperCase()}',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+                color: _getEmergencyMarkerColor(emergency),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Volunteers responding: ${emergency.responses.length}',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Close'),
+                ),
+                const SizedBox(width: 8),
+                if (_userRole == 'Volunteer' && 
+                    !emergency.responses.containsKey(FirebaseAuth.instance.currentUser?.uid))
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      setState(() {
+                        _currentEmergencyResponse = emergency;
+                      });
+                    },
+                    child: const Text('Respond'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Handle emergency marker long press - Direct response for volunteers
+  void _onEmergencyMarkerLongPress(Emergency emergency) {
+    // Only volunteers can respond via long press
+    if (_userRole != 'Volunteer') {
+      _onEmergencyMarkerTap(emergency); // Fall back to regular tap behavior
+      return;
+    }
+
+    // Check if volunteer has already responded
+    if (emergency.responses.containsKey(FirebaseAuth.instance.currentUser?.uid)) {
+      _showTopSnackBar(
+        message: 'You are already responding to this emergency',
+        backgroundColor: Colors.orange,
+        duration: const Duration(seconds: 2),
+        icon: const Icon(Icons.info, color: Colors.white),
+      );
+      return;
+    }
+
+    // Show quick response dialog
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              Icons.emergency,
+              color: _getEmergencyMarkerColor(emergency),
+              size: 28,
+            ),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text('Respond to Emergency?'),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Emergency from: ${emergency.attendeeName}',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            if (emergency.message != null) ...[
+              Text('Message: ${emergency.message!}'),
+              const SizedBox(height: 8),
+            ],
+            Text(
+              'Volunteers already responding: ${emergency.responses.length}',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey[600],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blue.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue.withOpacity(0.3)),
+              ),
+              child: const Text(
+                'Long press detected! This will immediately activate your emergency response card.',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              // Immediately set this emergency as current response
+              setState(() {
+                _currentEmergencyResponse = emergency;
+              });
+              
+              // Focus on emergency location
+              _focusOnLocation(emergency.location);
+              
+              // Show confirmation
+              _showTopSnackBar(
+                message: '🚨 Emergency response activated! Use the response card to update your status.',
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 4),
+                icon: const Icon(Icons.check_circle, color: Colors.white),
+              );
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('🚨 Respond Now'),
+          ),
+        ],
+      ),
+    );
+  }
 }

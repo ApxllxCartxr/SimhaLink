@@ -670,7 +670,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       size: 24,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 12),
                 ],
                 // Emergency button
                 FloatingActionButton(
@@ -683,7 +683,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     size: 28,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 // Location button
                 FloatingActionButton(
                   heroTag: "location",

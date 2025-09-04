@@ -5,10 +5,10 @@ import 'package:location/location.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:simha_link/models/user_location.dart';
 import 'package:simha_link/models/poi.dart';
+import 'package:simha_link/models/emergency.dart';
 import 'package:simha_link/config/app_colors.dart';
 import 'package:simha_link/services/geographic_marker_service.dart' as geo;
 import 'package:simha_link/services/marker_sizing_service.dart';
-import 'package:simha_link/services/marker_permission_service.dart';
 
 /// Manages marker creation and display based on user roles
 class MarkerManager {
@@ -78,24 +78,6 @@ class MarkerManager {
       return 40.0; // Fallback size
     }
   }
-
-  /// Convert POI MarkerType to geo.MarkerType
-  geo.MarkerType _convertPOITypeToGeoType(MarkerType poiType) {
-    switch (poiType) {
-      case MarkerType.emergency:
-        return geo.MarkerType.emergency;
-      case MarkerType.medical:
-        return geo.MarkerType.medical;
-      case MarkerType.drinkingWater:
-        return geo.MarkerType.drinkingWater;
-      case MarkerType.accessibility:
-        return geo.MarkerType.accessibility;
-      case MarkerType.historical:
-        return geo.MarkerType.historical;
-      default:
-        return geo.MarkerType.userLocation; // Default fallback
-    }
-  }
   
   /// Calculate zoom-responsive icon size
   double getZoomResponsiveIconSize({
@@ -124,18 +106,31 @@ class MarkerManager {
   /// Builds markers based on user role and available data
   List<Marker> buildMarkers({
     required List<UserLocation> groupMembers,
-    required List<UserLocation> emergencies,
+    required List<Emergency> activeEmergencies, // Changed from UserLocation emergencies
     required List<UserLocation> nearbyVolunteers,
     required List<UserLocation> allVolunteers,
     required LocationData? currentLocation,
     required Function(UserLocation) onUserMarkerTap,
+    Function(UserLocation)? onUserMarkerLongPress,
   }) {
     List<Marker> markers = [];
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     
-    // Role-based marker visibility
+    // Get list of user IDs who have active emergencies to avoid duplicate markers
+    final activeEmergencyUserIds = activeEmergencies
+        .where((emergency) => emergency.status != EmergencyStatus.resolved)
+        .map((emergency) => emergency.attendeeId)
+        .toSet();
+    
+    // Filter group members - exclude those with active emergencies
+    final filteredGroupMembers = groupMembers.where((member) {
+      // Don't show user markers for attendees who have active emergencies
+      return !activeEmergencyUserIds.contains(member.userId);
+    }).toList();
+    
+    // Role-based marker visibility (using filtered members)
     if (userRole == 'Attendee') {
-      markers.addAll(groupMembers
+      markers.addAll(filteredGroupMembers
           .where((member) => 
               member.userId != currentUserId && 
               (member.userRole == 'Attendee' || member.userRole == null))
@@ -144,34 +139,33 @@ class MarkerManager {
               AppColors.mapAttendee, 
               Icons.person_pin,
               onUserMarkerTap,
+              onUserMarkerLongPress,
           )));
     } else if (userRole == 'Volunteer') {
+      // Volunteers see nearby volunteers/organizers (filtered to exclude those with emergencies)
       markers.addAll(nearbyVolunteers
+          .where((volunteer) => !activeEmergencyUserIds.contains(volunteer.userId))
           .map((volunteer) => _buildUserMarker(
               volunteer, 
               volunteer.userRole == 'Volunteer' ? AppColors.mapVolunteer : AppColors.mapOrganizer, 
               volunteer.userRole == 'Volunteer' ? Icons.local_hospital : Icons.admin_panel_settings,
               onUserMarkerTap,
+              onUserMarkerLongPress,
           )));
-      
-      markers.addAll(emergencies.map((emergency) {
-        final isAlreadyShown = nearbyVolunteers.any((volunteer) => 
-            volunteer.userId == emergency.userId && emergency.isEmergency);
-        
-        if (isAlreadyShown) return null;
-        
-        return _buildEmergencyMarker(emergency, onUserMarkerTap);
-      }).where((marker) => marker != null).cast<Marker>());
     } else if (userRole == 'Organizer') {
+      // Organizers see all volunteers (filtered to exclude those with emergencies)
       markers.addAll(allVolunteers
+          .where((volunteer) => !activeEmergencyUserIds.contains(volunteer.userId))
           .map((volunteer) => _buildUserMarker(
               volunteer, 
               AppColors.mapVolunteer, 
               Icons.local_hospital,
               onUserMarkerTap,
+              onUserMarkerLongPress,
           )));
       
-      markers.addAll(groupMembers
+      // Organizers also see other organizers in their group (filtered)
+      markers.addAll(filteredGroupMembers
           .where((member) => 
               member.userId != currentUserId && 
               member.userRole == 'Organizer')
@@ -180,11 +174,12 @@ class MarkerManager {
               AppColors.mapOrganizer, 
               Icons.admin_panel_settings,
               onUserMarkerTap,
+              onUserMarkerLongPress,
           )));
     }
 
-    // Everyone sees their current location marker
-    if (currentLocation != null && currentUserId != null) {
+    // Current user marker (only if no active emergency)
+    if (currentLocation != null && currentUserId != null && !activeEmergencyUserIds.contains(currentUserId)) {
       markers.add(_buildCurrentLocationMarker(currentLocation));
     }
 
@@ -229,6 +224,7 @@ class MarkerManager {
     Color color, 
     IconData icon,
     Function(UserLocation) onTap,
+    [Function(UserLocation)? onLongPress]
   ) {
     final markerPosition = LatLng(user.latitude, user.longitude);
     final geoMarkerType = user.userRole == 'Organizer' ? geo.MarkerType.organizer : geo.MarkerType.volunteer;
@@ -247,6 +243,7 @@ class MarkerManager {
       height: markerSize,
       child: GestureDetector(
         onTap: () => onTap(user),
+        onLongPress: onLongPress != null ? () => onLongPress(user) : null,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           child: Stack(
@@ -273,46 +270,6 @@ class MarkerManager {
                   ),
                 ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-  
-  /// Builds an emergency marker
-  Marker _buildEmergencyMarker(UserLocation emergency, Function(UserLocation) onTap) {
-    final markerPosition = LatLng(emergency.latitude, emergency.longitude);
-    final currentZoom = mapController?.camera.zoom ?? 15.0;
-    
-    // Use standardized sizing service
-    final markerSize = MarkerSizingService.getStandardMarkerSize(
-      currentZoom: currentZoom,
-      geoMarkerType: geo.MarkerType.emergency,
-      useGeographicScaling: true,
-    );
-    final iconSize = MarkerSizingService.getIconSize(markerSize);
-    final priority = MarkerSizingService.getMarkerPriority(geo.MarkerType.emergency);
-    
-    return Marker(
-      point: LatLng(emergency.latitude, emergency.longitude),
-      width: markerSize,
-      height: markerSize,
-      child: GestureDetector(
-        onTap: () => onTap(emergency),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 300),
-          child: Container(
-            decoration: MarkerSizingService.createStandardMarkerDecoration(
-              primaryColor: AppColors.mapEmergency,
-              backgroundColor: AppColors.mapEmergency,
-              priority: priority,
-              isPulsing: true, // Emergency markers pulse
-            ),
-            child: Icon(
-              Icons.emergency,
-              color: Colors.white,
-              size: iconSize,
-            ),
           ),
         ),
       ),
