@@ -24,14 +24,17 @@ class StateSyncService {
       return;
     }
     
-  _currentUserId = user.uid;
+    _currentUserId = user.uid;
     AppLogger.logInfo('Initializing state sync for user: ${user.uid}');
+    
+    // Clean up any existing subscriptions
+    dispose();
     
     // Start syncing user document
     await _syncUserDocument();
     
-  // Start syncing group document
-  await _syncGroupDocument();
+    // Start syncing group document
+    await _syncGroupDocument();
   }
   /// Sync user document with local preferences
   static Future<void> _syncUserDocument() async {

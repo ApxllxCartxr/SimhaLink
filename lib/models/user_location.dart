@@ -6,6 +6,8 @@ class UserLocation {
   final bool isEmergency;
   final DateTime lastUpdated;
   final String? userRole; // Add user role to identify volunteers/organizers
+  final String? groupId; // Add group ID for emergency tracking
+  final String? emergencyMessage; // Optional emergency message
 
   UserLocation({
     required this.userId,
@@ -15,6 +17,8 @@ class UserLocation {
     this.isEmergency = false,
     required this.lastUpdated,
     this.userRole,
+    this.groupId,
+    this.emergencyMessage,
   });
 
   Map<String, dynamic> toMap() {
@@ -26,6 +30,8 @@ class UserLocation {
       'isEmergency': isEmergency,
       'lastUpdated': lastUpdated.toIso8601String(),
       'userRole': userRole,
+      'groupId': groupId,
+      'emergencyMessage': emergencyMessage,
     };
   }
 
@@ -38,6 +44,8 @@ class UserLocation {
       isEmergency: map['isEmergency'] ?? false,
       lastUpdated: DateTime.parse(map['lastUpdated']),
       userRole: map['userRole'] as String?,
+      groupId: map['groupId'] as String?,
+      emergencyMessage: map['emergencyMessage'] as String?,
     );
   }
 }

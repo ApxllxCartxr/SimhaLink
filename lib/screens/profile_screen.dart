@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:simha_link/services/auth_service.dart';
+import 'package:simha_link/services/group_management_service.dart';
 import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/screens/group_info_screen.dart';
 import 'package:simha_link/screens/auth_wrapper.dart';
+import 'package:simha_link/widgets/app_snackbar.dart';
+import 'package:simha_link/core/utils/app_logger.dart';
 
 class ProfileScreen extends StatefulWidget {
   const ProfileScreen({super.key});
@@ -105,32 +108,84 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final email = _user?.email ?? '';
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Profile'), backgroundColor: Colors.red.shade800),
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        title: const Text('Profile', style: TextStyle(color: Colors.white)),
+        backgroundColor: Colors.black,
+        iconTheme: const IconThemeData(color: Colors.white),
+        elevation: 0,
+      ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: CircularProgressIndicator(color: Colors.white))
           : Padding(
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   ListTile(
+                    tileColor: Colors.grey[900],
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     leading: CircleAvatar(
-                      backgroundColor: Colors.red.shade800,
-                      child: Text(displayName.isNotEmpty ? displayName[0].toUpperCase() : '?', style: const TextStyle(color: Colors.white)),
+                      backgroundColor: Colors.white,
+                      child: Text(
+                        displayName.isNotEmpty ? displayName[0].toUpperCase() : '?',
+                        style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+                      ),
                     ),
-                    title: Text(displayName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                    subtitle: Text(email),
+                    title: Text(
+                      displayName,
+                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                    ),
+                    subtitle: Text(email, style: const TextStyle(color: Colors.white70)),
                   ),
-                  const SizedBox(height: 16),
-                  Text('Group:', style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 24),
+                  Text('Group:', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white)),
                   const SizedBox(height: 8),
                   _groupId == null
-                      ? Row(children: [const Text('Not in a group'), const SizedBox(width: 12), FilledButton(onPressed: () => Navigator.pushReplacement(context, MaterialPageRoute(builder: (c) => const GroupCreationScreen())), child: const Text('Create / Join'))])
-                      : Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [Text(_groupId!, style: const TextStyle(fontWeight: FontWeight.w500)), TextButton(onPressed: _openGroupInfo, child: const Text('Group Info'))]),
+                      ? Row(
+                          children: [
+                            const Text('Not in a group', style: TextStyle(color: Colors.white70)),
+                            const SizedBox(width: 12),
+                            FilledButton(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                foregroundColor: Colors.black,
+                              ),
+                              onPressed: () => Navigator.pushReplacement(
+                                  context, MaterialPageRoute(builder: (c) => const GroupCreationScreen())),
+                              child: const Text('Create / Join'),
+                            )
+                          ],
+                        )
+                      : Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(_groupId!, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white)),
+                            TextButton(
+                              onPressed: _openGroupInfo,
+                              style: TextButton.styleFrom(foregroundColor: Colors.white),
+                              child: const Text('Group Info'),
+                            )
+                          ],
+                        ),
                   const Spacer(),
-                  FilledButton.tonal(onPressed: _openGroupInfo, child: const Text('Group Info')),
+                  FilledButton.tonal(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.grey[900],
+                      foregroundColor: Colors.white,
+                    ),
+                    onPressed: _openGroupInfo,
+                    child: const Text('Group Info'),
+                  ),
                   const SizedBox(height: 12),
-                  FilledButton(style: FilledButton.styleFrom(backgroundColor: Colors.red), onPressed: _handleLogout, child: const Text('Logout', style: TextStyle(color: Colors.white))),
+                  FilledButton(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                    ),
+                    onPressed: _handleLogout,
+                    child: const Text('Logout'),
+                  ),
                 ],
               ),
             ),

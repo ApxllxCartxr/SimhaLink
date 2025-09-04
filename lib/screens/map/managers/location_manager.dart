@@ -38,10 +38,36 @@ class LocationManager {
     }
   }
   
-  /// Starts listening to location changes
+  /// Starts listening to location changes with emergency-aware intervals
   void startLocationUpdates(Function(LocationData) onLocationUpdate) {
     _locationSubscription?.cancel();
+    
+    // Configure location settings based on emergency status
+    _location.changeSettings(
+      accuracy: isEmergency ? LocationAccuracy.high : LocationAccuracy.balanced,
+      interval: isEmergency ? 3000 : 10000, // 3s for emergency, 10s normal
+      distanceFilter: isEmergency ? 2 : 10, // 2m for emergency, 10m normal
+    );
+    
     _locationSubscription = _location.onLocationChanged.listen(onLocationUpdate);
+  }
+  
+  /// Update emergency status and reconfigure location tracking
+  void updateEmergencyStatus(bool newEmergencyStatus) {
+    if (isEmergency != newEmergencyStatus) {
+      isEmergency = newEmergencyStatus;
+      
+      // Reconfigure location tracking with new settings
+      if (_locationSubscription != null) {
+        _location.changeSettings(
+          accuracy: isEmergency ? LocationAccuracy.high : LocationAccuracy.balanced,
+          interval: isEmergency ? 3000 : 10000,
+          distanceFilter: isEmergency ? 2 : 10,
+        );
+        
+        debugPrint('📍 Location tracking reconfigured for emergency: $isEmergency');
+      }
+    }
   }
   
   /// Updates user location in Firebase
@@ -58,6 +84,7 @@ class LocationManager {
         isEmergency: isEmergency,
         lastUpdated: DateTime.now(),
         userRole: userRole,
+        groupId: groupId,
       );
 
       debugPrint('📍 Updating user location - Emergency: $isEmergency (User: ${location.userName})');

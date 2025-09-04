@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:simha_link/config/app_colors.dart';
 
 /// Legend widget showing marker meanings based on user role
-class MapLegend extends StatelessWidget {
+/// Now with collapsible functionality positioned at bottom left
+class MapLegend extends StatefulWidget {
   final String? userRole;
 
   const MapLegend({
@@ -11,23 +12,130 @@ class MapLegend extends StatelessWidget {
   });
 
   @override
+  State<MapLegend> createState() => _MapLegendState();
+}
+
+class _MapLegendState extends State<MapLegend> with TickerProviderStateMixin {
+  bool _isExpanded = false;
+  late AnimationController _animationController;
+  late Animation<double> _fadeAnimation;
+  late Animation<Offset> _slideAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+    _slideAnimation = Tween<Offset>(begin: const Offset(0, 1), end: const Offset(0, 0)).animate(
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  void _toggleExpanded() {
+    setState(() {
+      _isExpanded = !_isExpanded;
+      if (_isExpanded) {
+        _animationController.forward();
+      } else {
+        _animationController.reverse();
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Positioned(
-      bottom: 16,
+      bottom: 100, // Position above navigation bar (adjust as needed)
       left: 16,
-      child: Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Collapsible legend content
+          SlideTransition(
+            position: _slideAnimation,
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: _isExpanded ? _buildLegendCard() : const SizedBox.shrink(),
+            ),
+          ),
+          // Toggle button
+          const SizedBox(height: 8),
+          _buildToggleButton(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToggleButton() {
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
         color: AppColors.mapLegendBackground,
-        elevation: 8,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-          side: BorderSide(color: AppColors.border),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: AppColors.border, width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(24),
+          onTap: _toggleExpanded,
+          child: Center(
+            child: AnimatedRotation(
+              turns: _isExpanded ? 0.5 : 0.0,
+              duration: const Duration(milliseconds: 300),
+              child: Icon(
+                _isExpanded ? Icons.keyboard_arrow_down : Icons.info_outline,
+                color: AppColors.textPrimary,
+                size: 24,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLegendCard() {
+    return Card(
+      color: AppColors.mapLegendBackground,
+      elevation: 12,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: AppColors.border),
+      ),
+      child: Container(
+        constraints: const BoxConstraints(
+          maxWidth: 200,
+          maxHeight: 300,
         ),
         child: Padding(
           padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: _buildLegendItems(),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: _buildLegendItems(),
+            ),
           ),
         ),
       ),
@@ -53,7 +161,7 @@ class MapLegend extends StatelessWidget {
     ];
 
     // Add role-specific legend items
-    if (userRole == 'Attendee') {
+    if (widget.userRole == 'Attendee') {
       items.addAll([
         _buildLegendItem(
           Icons.person_pin,
@@ -61,7 +169,7 @@ class MapLegend extends StatelessWidget {
           AppColors.mapAttendee,
         ),
       ]);
-    } else if (userRole == 'Volunteer') {
+    } else if (widget.userRole == 'Volunteer') {
       items.addAll([
         _buildLegendItem(
           Icons.local_hospital,
@@ -79,7 +187,7 @@ class MapLegend extends StatelessWidget {
           AppColors.mapEmergency,
         ),
       ]);
-    } else if (userRole == 'Organizer') {
+    } else if (widget.userRole == 'Organizer') {
       items.addAll([
         _buildLegendItem(
           Icons.local_hospital,
@@ -108,7 +216,7 @@ class MapLegend extends StatelessWidget {
       const SizedBox(height: 4),
       _buildPOILegendItem('🚰', 'Water', Colors.blue.shade600),
       _buildPOILegendItem('🚻', 'Restroom', Colors.brown.shade600),
-      if (userRole == 'Volunteer' || userRole == 'Organizer')
+      if (widget.userRole == 'Volunteer' || widget.userRole == 'Organizer')
         _buildPOILegendItem('🏥', 'Medical', Colors.red.shade700),
     ]);
 

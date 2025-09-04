@@ -27,9 +27,9 @@ class MapInfoPanel extends StatelessWidget {
     }
 
     return Positioned(
-      top: 16,
+      top: 80, // Position below role info card
       left: 16,
-      right: 16,
+      right: 88, // Leave space for FAB column on right (16 + 56 + 16 = 88)
       child: Card(
         color: AppColors.surface,
         elevation: 8,

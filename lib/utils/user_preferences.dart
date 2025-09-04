@@ -26,6 +26,13 @@ class UserPreferences {
       await prefs.setString(key, groupId);
       debugPrint('💾 Set group ID for user ${user?.uid}: $groupId (using key: $key)');
       
+      // Clear the "has left group" flag since user is joining a new group
+      if (user != null) {
+        final hasLeftGroupKey = 'has_left_group_${user.uid}';
+        await prefs.remove(hasLeftGroupKey);
+        debugPrint('✅ Cleared has_left_group flag - user joining new group');
+      }
+      
       // Also backup to a user-email based key for persistence across login sessions
       if (user != null && user.email != null) {
         final emailBackupKey = 'email_group_${user.email!.replaceAll('.', '_')}';
@@ -47,8 +54,13 @@ class UserPreferences {
     final key = _getUserSpecificKey(_userGroupIdKey, user.uid);
     var groupId = prefs.getString(key);
     
+    // Check if user has intentionally left a group (flag prevents recovery)
+    final hasLeftGroupKey = 'has_left_group_${user.uid}';
+    final hasLeftGroup = prefs.getBool(hasLeftGroupKey) ?? false;
+    
     // Try to recover from email-based backup if primary key has no value
-    if (groupId == null && user.email != null) {
+    // BUT only if user hasn't intentionally left a group
+    if (groupId == null && user.email != null && !hasLeftGroup) {
       final emailBackupKey = 'email_group_${user.email!.replaceAll('.', '_')}';
       final backupGroupId = prefs.getString(emailBackupKey);
       
@@ -58,6 +70,8 @@ class UserPreferences {
         await setUserGroupId(backupGroupId);
         groupId = backupGroupId;
       }
+    } else if (hasLeftGroup && groupId == null) {
+      debugPrint('🚫 Not recovering group ID - user has intentionally left');
     }
     
     // Debug logging with more details to help troubleshoot
@@ -108,6 +122,12 @@ class UserPreferences {
     final key = _getUserSpecificKey(_userGroupIdKey, user.uid);
     await prefs.remove(key);
     await prefs.remove('has_skipped_group_${user.uid}'); // Clear any skip flags
+    
+    // Set flag to prevent recovery from email backup
+    final hasLeftGroupKey = 'has_left_group_${user.uid}';
+    await prefs.setBool(hasLeftGroupKey, true);
+    debugPrint('🚫 Set has_left_group flag to prevent recovery');
+    
     // Also remove email-based backup key to avoid accidental recovery
     if (user.email != null) {
       final emailBackupKey = 'email_group_${user.email!.replaceAll('.', '_')}';

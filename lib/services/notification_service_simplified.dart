@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:simha_link/models/user_location.dart';
+import 'package:simha_link/models/emergency.dart';
 import 'notifications/notification_models.dart';
 import 'notifications/emergency_notifications.dart';
 
@@ -10,11 +10,11 @@ class NotificationService {
   /// Send emergency notification
   static Future<void> sendEmergencyNotification({
     required String groupId,
-    required UserLocation emergencyUser,
+    required Emergency emergency,
   }) async {
     return EmergencyNotificationHandler.sendEmergencyNotification(
       groupId: groupId,
-      emergencyUser: emergencyUser,
+      emergency: emergency,
     );
   }
 
