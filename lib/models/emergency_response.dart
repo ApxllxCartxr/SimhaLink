@@ -125,6 +125,7 @@ enum EmergencyResponseStatus {
   responding('Responding', 'Confirmed to help'),
   enRoute('En Route', 'On the way to location'),
   arrived('Arrived', 'At the emergency location'),
+  verified('Verified', 'Emergency situation verified'),
   assisting('Assisting', 'Providing help'),
   completed('Completed', 'Emergency resolved'),
   unavailable('Unavailable', 'Cannot help at this time');
@@ -144,6 +145,8 @@ enum EmergencyResponseStatus {
       case EmergencyResponseStatus.enRoute:
         return EmergencyResponseStatus.arrived;
       case EmergencyResponseStatus.arrived:
+        return EmergencyResponseStatus.verified;
+      case EmergencyResponseStatus.verified:
         return EmergencyResponseStatus.assisting;
       case EmergencyResponseStatus.assisting:
         return EmergencyResponseStatus.completed;
@@ -163,6 +166,8 @@ enum EmergencyResponseStatus {
         return Colors.orange;
       case EmergencyResponseStatus.arrived:
         return Colors.purple;
+      case EmergencyResponseStatus.verified:
+        return Colors.teal;
       case EmergencyResponseStatus.assisting:
         return Colors.red;
       case EmergencyResponseStatus.completed:
@@ -183,6 +188,8 @@ enum EmergencyResponseStatus {
         return Icons.directions_run;
       case EmergencyResponseStatus.arrived:
         return Icons.location_on;
+      case EmergencyResponseStatus.verified:
+        return Icons.verified;
       case EmergencyResponseStatus.assisting:
         return Icons.medical_services;
       case EmergencyResponseStatus.completed:

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:simha_link/models/emergency.dart';
@@ -22,7 +23,13 @@ class EmergencyDatabaseService {
       final existingEmergency = await _firestore
           .collection(_collection)
           .where('attendeeId', isEqualTo: attendeeId)
-          .where('status', isEqualTo: EmergencyStatus.active.name)
+          .where('status', whereIn: [
+            EmergencyStatus.unverified.name,
+            EmergencyStatus.accepted.name,
+            EmergencyStatus.inProgress.name,
+            EmergencyStatus.verified.name,
+            EmergencyStatus.escalated.name,
+          ])
           .limit(1)
           .get();
       
@@ -43,7 +50,7 @@ class EmergencyDatabaseService {
         attendeeName: attendeeName,
         groupId: groupId,
         location: location,
-        status: EmergencyStatus.active,
+        status: EmergencyStatus.unverified, // NEW: Start as unverified
         message: message,
         createdAt: now,
         updatedAt: now,
@@ -97,7 +104,13 @@ class EmergencyDatabaseService {
       final snapshot = await _firestore
           .collection(_collection)
           .where('attendeeId', isEqualTo: userId)
-          .where('status', isEqualTo: EmergencyStatus.active.name)
+          .where('status', whereIn: [
+            EmergencyStatus.unverified.name,
+            EmergencyStatus.accepted.name,
+            EmergencyStatus.inProgress.name,
+            EmergencyStatus.verified.name,
+            EmergencyStatus.escalated.name,
+          ])
           .limit(1)
           .get();
 
@@ -133,9 +146,14 @@ class EmergencyDatabaseService {
         final status = data['status'] as String?;
         final createdAt = data['createdAt'] as Timestamp?;
         
-        if (status == EmergencyStatus.active.name) {
+        if (status == EmergencyStatus.unverified.name || 
+            status == EmergencyStatus.accepted.name ||
+            status == EmergencyStatus.inProgress.name ||
+            status == EmergencyStatus.verified.name ||
+            status == EmergencyStatus.escalated.name) {
           activeEmergencies.add(doc);
         } else if (status == EmergencyStatus.resolved.name || 
+                   status == EmergencyStatus.fake.name ||
                    (createdAt != null && DateTime.now().difference(createdAt.toDate()).inHours > 24)) {
           staleEmergencies.add(doc);
         }
@@ -433,7 +451,13 @@ class EmergencyDatabaseService {
     return _firestore
         .collection(_collection)
         .where('groupId', isEqualTo: groupId)
-        .where('status', whereIn: [EmergencyStatus.active.name, EmergencyStatus.inProgress.name])
+        .where('status', whereIn: [
+          EmergencyStatus.unverified.name, 
+          EmergencyStatus.accepted.name,
+          EmergencyStatus.inProgress.name,
+          EmergencyStatus.verified.name,
+          EmergencyStatus.escalated.name,
+        ])
         .orderBy('createdAt', descending: true)
         .snapshots()
         .map((snapshot) {
@@ -445,7 +469,13 @@ class EmergencyDatabaseService {
   static Stream<List<Emergency>> getAllEmergencies() {
     return _firestore
         .collection(_collection)
-        .where('status', whereIn: [EmergencyStatus.active.name, EmergencyStatus.inProgress.name])
+        .where('status', whereIn: [
+          EmergencyStatus.unverified.name, 
+          EmergencyStatus.accepted.name,
+          EmergencyStatus.inProgress.name,
+          EmergencyStatus.verified.name,
+          EmergencyStatus.escalated.name,
+        ])
         .orderBy('createdAt', descending: true)
         .snapshots()
         .map((snapshot) {
@@ -562,7 +592,13 @@ class EmergencyDatabaseService {
   static Stream<List<Emergency>> getVolunteerActiveResponses(String volunteerId) {
     return _firestore
         .collection(_collection)
-        .where('status', whereIn: [EmergencyStatus.active.name, EmergencyStatus.inProgress.name])
+        .where('status', whereIn: [
+          EmergencyStatus.unverified.name, 
+          EmergencyStatus.accepted.name,
+          EmergencyStatus.inProgress.name,
+          EmergencyStatus.verified.name,
+          EmergencyStatus.escalated.name,
+        ])
         .snapshots()
         .map((snapshot) {
       return snapshot.docs
@@ -636,14 +672,20 @@ class EmergencyDatabaseService {
       for (final doc in snapshot.docs) {
         final emergency = Emergency.fromFirestore(doc);
         switch (emergency.status) {
-          case EmergencyStatus.active:
+          case EmergencyStatus.unverified:
+          case EmergencyStatus.accepted:
             active++;
             break;
           case EmergencyStatus.inProgress:
+          case EmergencyStatus.verified:
+          case EmergencyStatus.escalated:
             inProgress++;
             break;
           case EmergencyStatus.resolved:
             resolved++;
+            break;
+          case EmergencyStatus.fake:
+            // Don't count fake emergencies in statistics
             break;
         }
       }
@@ -658,5 +700,187 @@ class EmergencyDatabaseService {
       AppLogger.logError('Error getting emergency stats', e);
       return {'active': 0, 'inProgress': 0, 'resolved': 0, 'total': 0};
     }
+  }
+
+  // ========== NEW: Enhanced Volunteer Response Pipeline Methods ==========
+
+  /// Mark emergency as accepted by volunteer
+  static Future<void> acceptEmergency({
+    required String emergencyId,
+    required String volunteerId,
+    required String volunteerName,
+    required LatLng volunteerLocation,
+  }) async {
+    try {
+      final now = DateTime.now();
+      final batch = _firestore.batch();
+
+      // Update emergency status to accepted
+      final emergencyRef = _firestore.collection(_collection).doc(emergencyId);
+      batch.update(emergencyRef, {
+        'status': EmergencyStatus.accepted.name,
+        'acceptedAt': Timestamp.fromDate(now),
+        'updatedAt': Timestamp.fromDate(now),
+      });
+
+      // Add volunteer response
+      batch.update(emergencyRef, {
+        'responses.$volunteerId': {
+          'volunteerId': volunteerId,
+          'volunteerName': volunteerName,
+          'status': EmergencyVolunteerStatus.responding.name,
+          'respondedAt': Timestamp.fromDate(now),
+          'lastUpdated': Timestamp.fromDate(now),
+          'location': GeoPoint(volunteerLocation.latitude, volunteerLocation.longitude),
+        }
+      });
+
+      await batch.commit();
+      AppLogger.logInfo('Emergency $emergencyId accepted by volunteer $volunteerId');
+    } catch (e) {
+      AppLogger.logError('Error accepting emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Mark volunteer as arrived and trigger verification
+  static Future<void> markVolunteerArrived({
+    required String emergencyId,
+    required String volunteerId,
+  }) async {
+    try {
+      final now = DateTime.now();
+      final batch = _firestore.batch();
+
+      // Update emergency status to in progress
+      final emergencyRef = _firestore.collection(_collection).doc(emergencyId);
+      batch.update(emergencyRef, {
+        'status': EmergencyStatus.inProgress.name,
+        'arrivedAt': Timestamp.fromDate(now),
+        'updatedAt': Timestamp.fromDate(now),
+      });
+
+      // Update volunteer status to arrived
+      batch.update(emergencyRef, {
+        'responses.$volunteerId.status': EmergencyVolunteerStatus.arrived.name,
+        'responses.$volunteerId.lastUpdated': Timestamp.fromDate(now),
+      });
+
+      await batch.commit();
+      AppLogger.logInfo('Volunteer $volunteerId marked as arrived at emergency $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error marking volunteer arrived', e);
+      rethrow;
+    }
+  }
+
+  /// Verify emergency as real or fake
+  static Future<void> verifyEmergency({
+    required String emergencyId,
+    required String volunteerId,
+    required bool isReal,
+    String? escalationReason,
+  }) async {
+    try {
+      final now = DateTime.now();
+      final batch = _firestore.batch();
+
+      final emergencyRef = _firestore.collection(_collection).doc(emergencyId);
+      
+      if (isReal) {
+        // Mark as verified real emergency
+        batch.update(emergencyRef, {
+          'status': escalationReason != null 
+              ? EmergencyStatus.escalated.name 
+              : EmergencyStatus.verified.name,
+          'verifiedAt': Timestamp.fromDate(now),
+          'verifiedBy': volunteerId,
+          'isVerified': true,
+          'isSeriousEscalation': escalationReason != null,
+          'escalationReason': escalationReason,
+          'updatedAt': Timestamp.fromDate(now),
+        });
+        
+        AppLogger.logInfo('Emergency $emergencyId verified as REAL by volunteer $volunteerId${escalationReason != null ? ' and ESCALATED' : ''}');
+      } else {
+        // Mark as fake emergency
+        batch.update(emergencyRef, {
+          'status': EmergencyStatus.fake.name,
+          'verifiedAt': Timestamp.fromDate(now),
+          'verifiedBy': volunteerId,
+          'isVerified': true,
+          'updatedAt': Timestamp.fromDate(now),
+        });
+        
+        AppLogger.logInfo('Emergency $emergencyId marked as FAKE by volunteer $volunteerId');
+      }
+
+      await batch.commit();
+    } catch (e) {
+      AppLogger.logError('Error verifying emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Mark emergency as resolved by volunteer (testing only)
+  static Future<void> markResolvedByVolunteer({
+    required String emergencyId,
+    required String volunteerId,
+  }) async {
+    try {
+      final now = DateTime.now();
+      final batch = _firestore.batch();
+
+      // Update emergency status to resolved
+      final emergencyRef = _firestore.collection(_collection).doc(emergencyId);
+      batch.update(emergencyRef, {
+        'status': EmergencyStatus.resolved.name,
+        'resolvedAt': Timestamp.fromDate(now),
+        'updatedAt': Timestamp.fromDate(now),
+        'resolvedBy.hasVolunteerCompleted': true,
+      });
+
+      // Update volunteer status to completed
+      batch.update(emergencyRef, {
+        'responses.$volunteerId.status': EmergencyVolunteerStatus.completed.name,
+        'responses.$volunteerId.lastUpdated': Timestamp.fromDate(now),
+      });
+
+      await batch.commit();
+      AppLogger.logInfo('Emergency $emergencyId resolved by volunteer $volunteerId');
+    } catch (e) {
+      AppLogger.logError('Error resolving emergency by volunteer', e);
+      rethrow;
+    }
+  }
+
+  /// Get filtered emergencies for volunteers (exclude fake emergencies)
+  static Stream<List<Emergency>> getVolunteerVisibleEmergencies(String groupId) {
+    return _firestore
+        .collection(_collection)
+        .where('groupId', isEqualTo: groupId)
+        .snapshots()
+        .map((snapshot) {
+      return snapshot.docs
+          .map((doc) => Emergency.fromFirestore(doc))
+          .where((emergency) => emergency.status.visibleToVolunteers) // Use extension method
+          .toList();
+    });
+  }
+
+  /// Get distance between volunteer and attendee
+  static double calculateDistance(LatLng point1, LatLng point2) {
+    const double earthRadius = 6371000; // Earth's radius in meters
+    final double lat1Rad = point1.latitude * (pi / 180);
+    final double lat2Rad = point2.latitude * (pi / 180);
+    final double deltaLatRad = (point2.latitude - point1.latitude) * (pi / 180);
+    final double deltaLonRad = (point2.longitude - point1.longitude) * (pi / 180);
+
+    final double a = sin(deltaLatRad / 2) * sin(deltaLatRad / 2) +
+        cos(lat1Rad) * cos(lat2Rad) *
+        sin(deltaLonRad / 2) * sin(deltaLonRad / 2);
+    final double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+
+    return earthRadius * c; // Distance in meters
   }
 }

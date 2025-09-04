@@ -372,4 +372,155 @@ class EmergencyManagementService {
       AppLogger.logError('Error disposing EmergencyManagementService', e);
     }
   }
+
+  // ========== NEW: Enhanced Volunteer Response Pipeline Methods ==========
+
+  /// Volunteer accepts emergency (Step 1: Unverified → Accepted)
+  static Future<void> volunteerAcceptEmergency({
+    required String emergencyId,
+    required String volunteerName,
+    required LatLng volunteerLocation,
+  }) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      await EmergencyDatabaseService.acceptEmergency(
+        emergencyId: emergencyId,
+        volunteerId: user.uid,
+        volunteerName: volunteerName,
+        volunteerLocation: volunteerLocation,
+      );
+
+      AppLogger.logInfo('Volunteer ${user.uid} accepted emergency $emergencyId');
+      
+      // Store current emergency for tracking
+      _currentEmergencyId = emergencyId;
+      _currentVolunteerId = user.uid;
+      
+    } catch (e) {
+      AppLogger.logError('Error accepting emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Volunteer marks as arrived (Step 2: Accepted → In Progress) 
+  static Future<void> volunteerMarkArrived({
+    required String emergencyId,
+  }) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      await EmergencyDatabaseService.markVolunteerArrived(
+        emergencyId: emergencyId,
+        volunteerId: user.uid,
+      );
+
+      AppLogger.logInfo('Volunteer ${user.uid} marked as arrived at emergency $emergencyId');
+      
+    } catch (e) {
+      AppLogger.logError('Error marking volunteer arrived', e);
+      rethrow;
+    }
+  }
+
+  /// Volunteer verifies emergency (Step 3: In Progress → Verified/Fake/Escalated)
+  static Future<void> volunteerVerifyEmergency({
+    required String emergencyId,
+    required bool isReal,
+    bool markAsSerious = false,
+    String? escalationReason,
+  }) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      // Determine escalation reason
+      String? finalEscalationReason;
+      if (isReal && markAsSerious) {
+        finalEscalationReason = escalationReason ?? 'Marked as serious by volunteer';
+      }
+
+      await EmergencyDatabaseService.verifyEmergency(
+        emergencyId: emergencyId,
+        volunteerId: user.uid,
+        isReal: isReal,
+        escalationReason: finalEscalationReason,
+      );
+
+      if (isReal) {
+        if (markAsSerious) {
+          AppLogger.logInfo('Volunteer ${user.uid} verified emergency $emergencyId as REAL and ESCALATED');
+        } else {
+          AppLogger.logInfo('Volunteer ${user.uid} verified emergency $emergencyId as REAL');
+        }
+      } else {
+        AppLogger.logInfo('Volunteer ${user.uid} marked emergency $emergencyId as FAKE');
+      }
+      
+    } catch (e) {
+      AppLogger.logError('Error verifying emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Volunteer resolves emergency (Step 4: Testing - Only volunteer can resolve)
+  static Future<void> volunteerResolveEmergency({
+    required String emergencyId,
+  }) async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      await EmergencyDatabaseService.markResolvedByVolunteer(
+        emergencyId: emergencyId,
+        volunteerId: user.uid,
+      );
+
+      AppLogger.logInfo('Volunteer ${user.uid} resolved emergency $emergencyId');
+      
+      // Clear current emergency tracking
+      if (_currentEmergencyId == emergencyId) {
+        _currentEmergencyId = null;
+        _currentVolunteerId = null;
+      }
+      
+    } catch (e) {
+      AppLogger.logError('Error resolving emergency by volunteer', e);
+      rethrow;
+    }
+  }
+
+  /// Get volunteer-visible emergencies (filters out fake emergencies)
+  static Stream<List<Emergency>> listenToVolunteerVisibleEmergencies(String groupId) {
+    return EmergencyDatabaseService.getVolunteerVisibleEmergencies(groupId);
+  }
+
+  /// Calculate distance between volunteer and emergency
+  static double calculateDistanceToEmergency(LatLng volunteerLocation, LatLng emergencyLocation) {
+    return EmergencyDatabaseService.calculateDistance(volunteerLocation, emergencyLocation);
+  }
+
+  /// Format distance for display
+  static String formatDistance(double distanceInMeters) {
+    if (distanceInMeters < 1000) {
+      return '${distanceInMeters.round()}m away';
+    } else {
+      final km = distanceInMeters / 1000;
+      return '${km.toStringAsFixed(1)}km away';
+    }
+  }
+
+  /// Get current emergency status for volunteer
+  static Future<Emergency?> getCurrentVolunteerEmergency() async {
+    try {
+      if (_currentEmergencyId == null) return null;
+      
+      return await EmergencyDatabaseService.getEmergency(_currentEmergencyId!);
+    } catch (e) {
+      AppLogger.logError('Error getting current volunteer emergency', e);
+      return null;
+    }
+  }
 }

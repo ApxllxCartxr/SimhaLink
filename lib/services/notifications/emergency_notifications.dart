@@ -1,6 +1,6 @@
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:simha_link/models/user_location.dart';
+import 'package:simha_link/models/emergency.dart';
 import 'notification_models.dart';
 
 /// Handles emergency notifications
@@ -10,19 +10,20 @@ class EmergencyNotificationHandler {
   /// Send emergency notification to nearest volunteers AND group members
   static Future<void> sendEmergencyNotification({
     required String groupId,
-    required UserLocation emergencyUser,
+    required Emergency emergency,
   }) async {
     try {
       final notification = NotificationData(
         id: '',
         type: NotificationType.emergency,
         title: '🚨 Emergency Alert',
-        message: '${emergencyUser.userName} needs immediate assistance!',
+        message: '${emergency.attendeeName} needs immediate assistance!',
         data: {
           'groupId': groupId,
-          'userId': emergencyUser.userId,
-          'latitude': emergencyUser.latitude,
-          'longitude': emergencyUser.longitude,
+          'emergencyId': emergency.emergencyId,
+          'userId': emergency.attendeeId,
+          'latitude': emergency.location.latitude,
+          'longitude': emergency.location.longitude,
           'isEmergency': true,
         },
         timestamp: DateTime.now(),
@@ -32,9 +33,9 @@ class EmergencyNotificationHandler {
       await _sendNotificationToGroup(groupId, notification);
       
       // Send to nearby volunteers
-      await _notifyNearestVolunteers(emergencyUser, notification);
+      await _notifyNearestVolunteers(emergency, notification);
 
-      print('✅ Emergency alert sent successfully for ${emergencyUser.userName}');
+      print('✅ Emergency alert sent successfully for ${emergency.attendeeName}');
     } catch (e) {
       print('❌ Failed to send emergency notification: $e');
       throw Exception('Failed to send emergency notification: ${e.toString()}');
@@ -50,36 +51,39 @@ class EmergencyNotificationHandler {
       final groupDoc = await _firestore.collection('groups').doc(groupId).get();
       
       if (!groupDoc.exists) {
-        print('⚠️ Group $groupId not found for emergency notification');
+        print('❌ Group $groupId not found');
         return;
       }
 
-      final List<dynamic> memberIds = groupDoc.data()?['memberIds'] ?? [];
-      
-      for (final memberId in memberIds) {
-        if (memberId != notification.data['userId']) {
-          final notificationRef = _firestore
+      final groupData = groupDoc.data();
+      final List<dynamic> members = groupData?['members'] ?? [];
+
+      for (final memberId in members) {
+        try {
+          final memberNotificationRef = _firestore
               .collection('users')
               .doc(memberId)
               .collection('notifications')
               .doc();
 
-          await notificationRef.set({
+          await memberNotificationRef.set({
             ...notification.toMap(),
-            'id': notificationRef.id,
+            'id': memberNotificationRef.id,
           });
+        } catch (e) {
+          print('❌ Failed to send notification to member $memberId: $e');
         }
       }
-      
-      print('📤 Emergency notification sent to ${memberIds.length - 1} group members');
+
+      print('📱 Emergency notification sent to ${members.length} group members');
     } catch (e) {
-      print('❌ Error sending notification to group: $e');
+      print('❌ Error sending notifications to group: $e');
     }
   }
 
   /// Find and notify nearest volunteers from all groups within 5km radius
   static Future<void> _notifyNearestVolunteers(
-    UserLocation emergencyUser,
+    Emergency emergency,
     NotificationData notification,
   ) async {
     try {
@@ -97,31 +101,39 @@ class EmergencyNotificationHandler {
               .get();
           
           for (final locationDoc in locationsSnapshot.docs) {
-            final userLocation = UserLocation.fromMap(locationDoc.data());
+            final locationData = locationDoc.data();
+            final userId = locationData['userId'] as String?;
+            final userRole = locationData['userRole'] as String?;
+            final latitude = (locationData['latitude'] as num?)?.toDouble();
+            final longitude = (locationData['longitude'] as num?)?.toDouble();
+            
+            // Skip if missing essential data
+            if (userId == null || userRole == null || latitude == null || longitude == null) {
+              continue;
+            }
             
             // Only notify volunteers and organizers
-            if (userLocation.userRole != 'Volunteer' && userLocation.userRole != 'Organizer') {
+            if (userRole != 'Volunteer' && userRole != 'Organizer') {
               continue;
             }
             
             // Skip if already notified or if it's the emergency user
-            if (notifiedVolunteers.contains(userLocation.userId) ||
-                userLocation.userId == emergencyUser.userId) {
+            if (notifiedVolunteers.contains(userId) || userId == emergency.attendeeId) {
               continue;
             }
             
             final distance = _calculateDistance(
-              emergencyUser.latitude,
-              emergencyUser.longitude,
-              userLocation.latitude,
-              userLocation.longitude,
+              emergency.location.latitude,
+              emergency.location.longitude,
+              latitude,
+              longitude,
             );
             
-            // Notify if within 5km
+            // Notify if within 5km radius
             if (distance <= 5000) {
               final volunteerNotificationRef = _firestore
                   .collection('users')
-                  .doc(userLocation.userId)
+                  .doc(userId)
                   .collection('notifications')
                   .doc();
 
@@ -131,8 +143,9 @@ class EmergencyNotificationHandler {
                 'distance': distance.round(),
               });
               
-              notifiedVolunteers.add(userLocation.userId);
-              print('🚑 Notified ${userLocation.userRole?.toLowerCase()} ${userLocation.userName} (${distance.round()}m away)');
+              notifiedVolunteers.add(userId);
+              final userName = locationData['userName'] as String? ?? 'Unknown';
+              print('🚑 Notified ${userRole.toLowerCase()} $userName (${distance.round()}m away)');
             }
           }
         } catch (e) {
@@ -149,12 +162,18 @@ class EmergencyNotificationHandler {
   /// Calculate distance between two points in meters
   static double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
     const double earthRadius = 6371000;
-    final double dLat = (lat2 - lat1) * (pi / 180);
-    final double dLon = (lon2 - lon1) * (pi / 180);
-    final double a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(lat1 * (pi / 180)) * cos(lat2 * (pi / 180)) *
+    double dLat = _degreesToRadians(lat2 - lat1);
+    double dLon = _degreesToRadians(lon2 - lon1);
+    
+    double a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_degreesToRadians(lat1)) * cos(_degreesToRadians(lat2)) *
         sin(dLon / 2) * sin(dLon / 2);
-    final double c = 2 * atan2(sqrt(a), sqrt(1 - a));
+        
+    double c = 2 * atan2(sqrt(a), sqrt(1 - a));
     return earthRadius * c;
+  }
+
+  static double _degreesToRadians(double degrees) {
+    return degrees * (pi / 180);
   }
 }

@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:flutter/material.dart';
 
 /// Represents an emergency in the system
 class Emergency {
@@ -14,6 +15,16 @@ class Emergency {
   final DateTime updatedAt;
   final Map<String, EmergencyVolunteerResponse> responses;
   final EmergencyResolution resolvedBy;
+  
+  // NEW: Verification and timeline fields
+  final DateTime? acceptedAt;        // When volunteer accepted
+  final DateTime? arrivedAt;         // When volunteer marked as arrived
+  final DateTime? verifiedAt;        // When volunteer verified emergency
+  final DateTime? resolvedAt;        // When emergency was resolved
+  final String? verifiedBy;          // Volunteer ID who verified
+  final bool isVerified;             // Whether emergency has been verified
+  final bool isSeriousEscalation;    // Whether marked for escalation
+  final String? escalationReason;    // Reason for escalation
 
   const Emergency({
     required this.emergencyId,
@@ -27,6 +38,15 @@ class Emergency {
     required this.updatedAt,
     required this.responses,
     required this.resolvedBy,
+    // NEW: Verification and timeline fields
+    this.acceptedAt,
+    this.arrivedAt,
+    this.verifiedAt,
+    this.resolvedAt,
+    this.verifiedBy,
+    this.isVerified = false,
+    this.isSeriousEscalation = false,
+    this.escalationReason,
   });
 
   /// Convert to Firestore document
@@ -43,6 +63,15 @@ class Emergency {
       'updatedAt': Timestamp.fromDate(updatedAt),
       'responses': responses.map((key, value) => MapEntry(key, value.toMap())),
       'resolvedBy': resolvedBy.toMap(),
+      // NEW: Verification and timeline fields
+      'acceptedAt': acceptedAt != null ? Timestamp.fromDate(acceptedAt!) : null,
+      'arrivedAt': arrivedAt != null ? Timestamp.fromDate(arrivedAt!) : null,
+      'verifiedAt': verifiedAt != null ? Timestamp.fromDate(verifiedAt!) : null,
+      'resolvedAt': resolvedAt != null ? Timestamp.fromDate(resolvedAt!) : null,
+      'verifiedBy': verifiedBy,
+      'isVerified': isVerified,
+      'isSeriousEscalation': isSeriousEscalation,
+      'escalationReason': escalationReason,
     };
   }
 
@@ -61,7 +90,7 @@ class Emergency {
         message: data['message'],
         status: EmergencyStatus.values.firstWhere(
           (e) => e.name == data['status'],
-          orElse: () => EmergencyStatus.active,
+          orElse: () => EmergencyStatus.unverified, // NEW: Default to unverified
         ),
         createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
         updatedAt: (data['updatedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
@@ -73,6 +102,15 @@ class Emergency {
         resolvedBy: EmergencyResolution.fromMap(
           data['resolvedBy'] as Map<String, dynamic>? ?? {},
         ),
+        // NEW: Verification and timeline fields
+        acceptedAt: (data['acceptedAt'] as Timestamp?)?.toDate(),
+        arrivedAt: (data['arrivedAt'] as Timestamp?)?.toDate(),
+        verifiedAt: (data['verifiedAt'] as Timestamp?)?.toDate(),
+        resolvedAt: (data['resolvedAt'] as Timestamp?)?.toDate(),
+        verifiedBy: data['verifiedBy'] as String?,
+        isVerified: data['isVerified'] as bool? ?? false,
+        isSeriousEscalation: data['isSeriousEscalation'] as bool? ?? false,
+        escalationReason: data['escalationReason'] as String?,
       );
     } catch (e) {
       // Log the error for debugging
@@ -94,6 +132,15 @@ class Emergency {
     DateTime? updatedAt,
     Map<String, EmergencyVolunteerResponse>? responses,
     EmergencyResolution? resolvedBy,
+    // NEW: Verification and timeline fields
+    DateTime? acceptedAt,
+    DateTime? arrivedAt,
+    DateTime? verifiedAt,
+    DateTime? resolvedAt,
+    String? verifiedBy,
+    bool? isVerified,
+    bool? isSeriousEscalation,
+    String? escalationReason,
   }) {
     return Emergency(
       emergencyId: emergencyId ?? this.emergencyId,
@@ -107,11 +154,20 @@ class Emergency {
       updatedAt: updatedAt ?? this.updatedAt,
       responses: responses ?? this.responses,
       resolvedBy: resolvedBy ?? this.resolvedBy,
+      // NEW: Verification and timeline fields
+      acceptedAt: acceptedAt ?? this.acceptedAt,
+      arrivedAt: arrivedAt ?? this.arrivedAt,
+      verifiedAt: verifiedAt ?? this.verifiedAt,
+      resolvedAt: resolvedAt ?? this.resolvedAt,
+      verifiedBy: verifiedBy ?? this.verifiedBy,
+      isVerified: isVerified ?? this.isVerified,
+      isSeriousEscalation: isSeriousEscalation ?? this.isSeriousEscalation,
+      escalationReason: escalationReason ?? this.escalationReason,
     );
   }
 
-  /// Check if emergency is active (not resolved)
-  bool get isActive => status == EmergencyStatus.active || status == EmergencyStatus.inProgress;
+  /// Check if emergency is active (not resolved or fake)
+  bool get isActive => status != EmergencyStatus.resolved && status != EmergencyStatus.fake;
 
   /// Check if emergency is fully resolved
   bool get isFullyResolved => resolvedBy.attendee && resolvedBy.hasVolunteerCompleted;
@@ -126,9 +182,70 @@ class Emergency {
 
 /// Emergency status enum
 enum EmergencyStatus {
-  active,
-  inProgress,
-  resolved,
+  unverified,    // NEW: Initial state - emergency created but not verified
+  accepted,      // NEW: Volunteer has accepted and is responding
+  inProgress,    // Existing: Volunteer has arrived and is handling
+  verified,      // NEW: Emergency confirmed as real by volunteer
+  resolved,      // Existing: Emergency completed successfully
+  fake,          // NEW: Emergency marked as fake by volunteer
+  escalated,     // NEW: Emergency escalated for serious situations
+}
+
+extension EmergencyStatusExtension on EmergencyStatus {
+  /// Get display name for status
+  String get displayName {
+    switch (this) {
+      case EmergencyStatus.unverified:
+        return 'Unverified';
+      case EmergencyStatus.accepted:
+        return 'Help Coming';
+      case EmergencyStatus.inProgress:
+        return 'In Progress';
+      case EmergencyStatus.verified:
+        return 'Verified';
+      case EmergencyStatus.resolved:
+        return 'Resolved';
+      case EmergencyStatus.fake:
+        return 'Fake';
+      case EmergencyStatus.escalated:
+        return 'Escalated';
+    }
+  }
+
+  /// Get color for status
+  Color get statusColor {
+    switch (this) {
+      case EmergencyStatus.unverified:
+        return Colors.orange;
+      case EmergencyStatus.accepted:
+        return Colors.blue;
+      case EmergencyStatus.inProgress:
+        return Colors.purple;
+      case EmergencyStatus.verified:
+        return Colors.red;
+      case EmergencyStatus.resolved:
+        return Colors.green;
+      case EmergencyStatus.fake:
+        return Colors.grey;
+      case EmergencyStatus.escalated:
+        return Colors.deepOrange;
+    }
+  }
+
+  /// Check if emergency should be visible to volunteers
+  bool get visibleToVolunteers {
+    switch (this) {
+      case EmergencyStatus.unverified:
+      case EmergencyStatus.accepted:
+      case EmergencyStatus.inProgress:
+      case EmergencyStatus.verified:
+      case EmergencyStatus.escalated:
+        return true;
+      case EmergencyStatus.resolved:
+      case EmergencyStatus.fake:
+        return false; // Hide resolved and fake emergencies
+    }
+  }
 }
 
 /// Emergency volunteer response within an emergency
@@ -200,6 +317,7 @@ enum EmergencyVolunteerStatus {
   responding,
   enRoute,
   arrived,
+  verified,    // NEW: Emergency verified by volunteer
   assisting,
   completed,
   unavailable,
@@ -217,6 +335,8 @@ extension EmergencyVolunteerStatusExtension on EmergencyVolunteerStatus {
         return 'En Route';
       case EmergencyVolunteerStatus.arrived:
         return 'Arrived';
+      case EmergencyVolunteerStatus.verified:
+        return 'Verified';
       case EmergencyVolunteerStatus.assisting:
         return 'Assisting';
       case EmergencyVolunteerStatus.completed:

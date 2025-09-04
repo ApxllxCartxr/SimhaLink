@@ -138,7 +138,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               if (_userRole == 'Attendee') {
                 final userId = FirebaseAuth.instance.currentUser?.uid;
                 final hasActiveEmergency = emergencies.any((emergency) => 
-                  emergency.attendeeId == userId && emergency.status == EmergencyStatus.active);
+                  emergency.attendeeId == userId && emergency.isActive); // Use isActive property
                 
                 if (_isEmergency != hasActiveEmergency) {
                   _isEmergency = hasActiveEmergency;
@@ -229,7 +229,13 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 _activeEmergencies = _activeEmergencies
                     .where((emergency) => emergency.groupId != groupId)
                     .toList();
-                _activeEmergencies.addAll(groupEmergencies);
+                
+                // FILTER: Only add emergencies visible to volunteers (exclude fake/resolved)
+                final visibleEmergencies = groupEmergencies
+                    .where((emergency) => emergency.status.visibleToVolunteers)
+                    .toList();
+                    
+                _activeEmergencies.addAll(visibleEmergencies);
                 
                 // Sort by creation time (newest first)
                 _activeEmergencies.sort((a, b) => b.createdAt.compareTo(a.createdAt));
@@ -1331,14 +1337,22 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           
           // Emergency Response Card for Volunteers - Connected to Database
           // Positioned with better spacing and responsiveness
-          if (_userRole == 'Volunteer' && _currentEmergencyResponse != null)
+          // Emergency Response Card for volunteers - positioned at bottom
+          if (_userRole == 'Volunteer' && _currentEmergencyResponse != null) ...[
+            // DEBUG: Log when card should show
+            Builder(
+              builder: (context) {
+                print('🔍 DEBUG BUILD: Emergency response card should show - Role: $_userRole, Emergency: ${_currentEmergencyResponse?.emergencyId}');
+                return Container();
+              },
+            ),
             Positioned(
-              bottom: MediaQuery.of(context).size.height * 0.15, // Responsive positioning
+              bottom: 16, // At bottom of screen
               left: 16,
-              right: MediaQuery.of(context).size.width * 0.25, // Leave more space for FABs
+              right: 16,
               child: Container(
                 constraints: BoxConstraints(
-                  maxHeight: MediaQuery.of(context).size.height * 0.3, // Prevent card from being too tall
+                  maxHeight: MediaQuery.of(context).size.height * 0.4, // Limit height for swipe area
                 ),
                 child: EmergencyResponseCard(
                   emergency: _currentEmergencyResponse,
@@ -1357,7 +1371,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     notes: _currentEmergencyResponse!.message,
                   ),
                   onStatusUpdate: (status) async {
+                    print('🎯 DEBUG: Status update triggered with: ${status.name}');
                     if (_currentEmergencyResponse != null) {
+                      print('🎯 DEBUG: Calling _updateVolunteerResponseStatus');
                       await _updateVolunteerResponseStatus(_currentEmergencyResponse!, status);
                       
                       // If volunteer marked as completed, clear the current response
@@ -1387,6 +1403,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 ),
               ),
             ),
+          ],
           
           // Role info
           Positioned(
@@ -1451,28 +1468,110 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     );
   }
 
-  /// Update volunteer response status using new emergency system
+  /// Update volunteer response status using new enhanced emergency system
   Future<void> _updateVolunteerResponseStatus(Emergency emergency, EmergencyResponseStatus newStatus) async {
     try {
-      // Update volunteer status in the new emergency database
-      await _handleVolunteerResponseUpdate(emergency, newStatus);
-      
-      // If volunteer marks as completed, automatically resolve the attendee's emergency
-      if (newStatus == EmergencyResponseStatus.completed) {
-        // Mark volunteer response as completed in the emergency
-        final userId = FirebaseAuth.instance.currentUser?.uid;
-        if (userId != null) {
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) return;
+
+      print('🔄 Updating volunteer status to: ${newStatus.name}');
+
+      // Use the new enhanced pipeline methods
+      switch (newStatus) {
+        case EmergencyResponseStatus.responding:
+          // Update to responding status
           await EmergencyManagementService.updateVolunteerStatus(
             emergencyId: emergency.emergencyId,
-            status: EmergencyVolunteerStatus.completed,
+            status: EmergencyVolunteerStatus.responding,
+          );
+          break;
+          
+        case EmergencyResponseStatus.enRoute:
+          // Update to en route status
+          await EmergencyManagementService.updateVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            status: EmergencyVolunteerStatus.enRoute,
+          );
+          break;
+          
+        case EmergencyResponseStatus.arrived:
+          // Mark as arrived
+          await EmergencyManagementService.volunteerMarkArrived(
+            emergencyId: emergency.emergencyId,
+          );
+          break;
+          
+        case EmergencyResponseStatus.verified:
+          // Mark emergency as verified and update volunteer status
+          await EmergencyManagementService.updateVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            status: EmergencyVolunteerStatus.verified,
+          );
+          
+          // Verify the emergency as real using the existing service
+          await EmergencyManagementService.volunteerVerifyEmergency(
+            emergencyId: emergency.emergencyId,
+            isReal: true,
+            markAsSerious: false,
+          );
+          
+          _showTopSnackBar(
+            message: '✅ Emergency verified - proceeding to assist',
+            backgroundColor: Colors.teal,
+            duration: const Duration(seconds: 3),
+            icon: const Icon(Icons.verified, color: Colors.white),
+          );
+          print('✅ Emergency verified by volunteer');
+          break;
+          
+        case EmergencyResponseStatus.assisting:
+          // Start assisting
+          await EmergencyManagementService.updateVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            status: EmergencyVolunteerStatus.assisting,
+          );
+          print('🚑 Volunteer started assisting');
+          break;
+          
+        case EmergencyResponseStatus.completed:
+          // Resolve emergency
+          await EmergencyManagementService.volunteerResolveEmergency(
+            emergencyId: emergency.emergencyId,
           );
           
           // Clear current emergency response
           setState(() {
             _currentEmergencyResponse = null;
           });
-        }
+          
+          _showTopSnackBar(
+            message: '✅ Emergency marked as resolved',
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+            icon: const Icon(Icons.check_circle, color: Colors.white),
+          );
+          print('✅ Emergency resolved by volunteer');
+          break;
+          
+        case EmergencyResponseStatus.unavailable:
+          // Remove volunteer response
+          await EmergencyDatabaseService.removeVolunteerResponse(
+            emergencyId: emergency.emergencyId,
+            volunteerId: userId,
+          );
+          
+          // Clear current emergency response
+          setState(() {
+            _currentEmergencyResponse = null;
+          });
+          break;
+          
+        default:
+          break;
       }
+      
+      // Refresh the emergency data to reflect the updated status
+      await _refreshCurrentEmergencyData(emergency.emergencyId);
       
       // Show confirmation message
       if (mounted) {
@@ -1484,6 +1583,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         );
       }
     } catch (e) {
+      AppLogger.logError('Error updating volunteer response status', e);
+      
       if (mounted) {
         _showTopSnackBar(
           message: '❌ Failed to update status: $e',
@@ -1492,6 +1593,41 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           icon: const Icon(Icons.error, color: Colors.white),
         );
       }
+    }
+  }
+
+  /// Refresh the current emergency data to reflect updated status
+  Future<void> _refreshCurrentEmergencyData(String emergencyId) async {
+    try {
+      print('🔄 Refreshing emergency data for: $emergencyId');
+      
+      // Get updated emergency data from database
+      final updatedEmergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      
+      if (updatedEmergency != null && mounted) {
+        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+        if (currentUserId != null && updatedEmergency.responses.containsKey(currentUserId)) {
+          final volunteerStatus = updatedEmergency.responses[currentUserId]!.status;
+          print('🔄 Updated volunteer status: ${volunteerStatus.name}');
+        }
+        
+        setState(() {
+          // Update the current emergency response with fresh data
+          _currentEmergencyResponse = updatedEmergency;
+          
+          // Update the emergency in the active emergencies list
+          final index = _activeEmergencies.indexWhere((e) => e.emergencyId == emergencyId);
+          if (index != -1) {
+            _activeEmergencies[index] = updatedEmergency;
+          }
+        });
+        
+        print('🔄 Emergency data refreshed successfully for: $emergencyId');
+      } else {
+        print('❌ No updated emergency data found for: $emergencyId');
+      }
+    } catch (e) {
+      print('❌ Error refreshing emergency data: $e');
     }
   }
 
@@ -1601,118 +1737,170 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     }
   }
 
-  // Top navigation AppBar removed per new UI. Helper methods were deleted.
-
-  /// Get current volunteer's response status for an emergency
-  EmergencyResponseStatus _getCurrentVolunteerStatus(Emergency emergency) {
-    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-    if (currentUserId == null) return EmergencyResponseStatus.notified;
-
-    final response = emergency.responses[currentUserId];
-    if (response == null) return EmergencyResponseStatus.notified;
-
-    switch (response.status) {
-      case EmergencyVolunteerStatus.responding:
-        return EmergencyResponseStatus.enRoute;
-      case EmergencyVolunteerStatus.arrived:
-        return EmergencyResponseStatus.arrived;
-      case EmergencyVolunteerStatus.completed:
-        return EmergencyResponseStatus.completed;
-      default:
-        return EmergencyResponseStatus.notified;
-    }
-  }
-
-  /// Handle volunteer response status updates
-  Future<void> _handleVolunteerResponseUpdate(Emergency emergency, EmergencyResponseStatus status) async {
+  /// Initiate volunteer response to an emergency
+  Future<void> _initiateVolunteerResponse(Emergency emergency) async {
     final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
+    if (currentUser == null) {
+      _showTopSnackBar(
+        message: '❌ You must be logged in to respond to emergencies',
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3),
+        icon: const Icon(Icons.error, color: Colors.white),
+      );
+      return;
+    }
+
+    // Check if volunteer has already responded
+    if (emergency.responses.containsKey(currentUser.uid)) {
+      _showTopSnackBar(
+        message: '⚠️ You are already responding to this emergency',
+        backgroundColor: Colors.orange,
+        duration: const Duration(seconds: 3),
+        icon: const Icon(Icons.info, color: Colors.white),
+      );
+      return;
+    }
 
     try {
-      // Get current location if available
+      // Get current location for volunteer response
       LatLng? currentLocation;
       final locationData = _locationManager.currentLocation;
       if (locationData?.latitude != null && locationData?.longitude != null) {
         currentLocation = LatLng(locationData!.latitude!, locationData.longitude!);
       }
 
-      switch (status) {
-        case EmergencyResponseStatus.responding:
-        case EmergencyResponseStatus.enRoute:
-          if (currentLocation != null) {
-            await EmergencyManagementService.volunteerRespond(
-              emergencyId: emergency.emergencyId,
-              volunteerName: currentUser.displayName ?? 'Unknown Volunteer',
-              volunteerLocation: currentLocation,
-            );
-          }
-          break;
-
-        case EmergencyResponseStatus.arrived:
-          await EmergencyManagementService.updateVolunteerStatus(
-            emergencyId: emergency.emergencyId,
-            status: EmergencyVolunteerStatus.arrived,
-          );
-          break;
-
-        case EmergencyResponseStatus.completed:
-          await EmergencyManagementService.updateVolunteerStatus(
-            emergencyId: emergency.emergencyId,
-            status: EmergencyVolunteerStatus.completed,
-          );
-          break;
-
-        case EmergencyResponseStatus.unavailable:
-          // Remove volunteer response from database
-          await EmergencyDatabaseService.removeVolunteerResponse(
-            emergencyId: emergency.emergencyId,
-            volunteerId: currentUser.uid,
-          );
-          break;
-
-        default:
-          break;
-      }
-
-      // Show success feedback
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(_getStatusUpdateMessage(status)),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
+      if (currentLocation == null) {
+        _showTopSnackBar(
+          message: '❌ Cannot determine your location. Please ensure GPS is enabled.',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 4),
+          icon: const Icon(Icons.location_off, color: Colors.white),
         );
+        return;
       }
+
+      // Show loading indicator
+      _showTopSnackBar(
+        message: '⏳ Initiating emergency response...',
+        backgroundColor: Colors.blue,
+        duration: const Duration(seconds: 2),
+        icon: const Icon(Icons.hourglass_empty, color: Colors.white),
+      );
+
+      // STEP 1: Record volunteer response in database using new enhanced method
+      await EmergencyManagementService.volunteerAcceptEmergency(
+        emergencyId: emergency.emergencyId,
+        volunteerName: currentUser.displayName ?? 'Unknown Volunteer',
+        volunteerLocation: currentLocation,
+      );
+
+      // STEP 2: Set this as the current emergency response for the UI
+      setState(() {
+        _currentEmergencyResponse = emergency;
+      });
+
+      // STEP 3: Focus map on emergency location
+      _focusOnLocation(emergency.location);
+
+      // STEP 4: Show success notification
+      _showTopSnackBar(
+        message: '✅ Emergency response initiated! Use the response card to update your status.',
+        backgroundColor: Colors.green,
+        duration: const Duration(seconds: 4),
+        icon: const Icon(Icons.check_circle, color: Colors.white),
+      );
+
+      // STEP 5: Notify attendee that help is coming
+      await _notifyAttendeeHelpComing(emergency);
+
     } catch (e) {
-      print('Error updating volunteer response: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to update response: ${e.toString()}'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+      AppLogger.logError('Error initiating volunteer response', e);
+      
+      _showTopSnackBar(
+        message: '❌ Failed to initiate response: ${e.toString()}',
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 4),
+        icon: const Icon(Icons.error, color: Colors.white),
+      );
     }
   }
 
-  /// Get user-friendly status update message
-  String _getStatusUpdateMessage(EmergencyResponseStatus status) {
-    switch (status) {
-      case EmergencyResponseStatus.responding:
-      case EmergencyResponseStatus.enRoute:
-        return 'Response confirmed - heading to emergency';
-      case EmergencyResponseStatus.arrived:
-        return 'Arrival confirmed at emergency location';
-      case EmergencyResponseStatus.completed:
-        return 'Emergency response completed successfully';
-      case EmergencyResponseStatus.unavailable:
-        return 'Emergency response cancelled';
-      default:
-        return 'Status updated';
+  /// Notify attendee that a volunteer is coming to help
+  Future<void> _notifyAttendeeHelpComing(Emergency emergency) async {
+    try {
+      // Calculate distance to emergency
+      final currentLocation = _locationManager.currentLocation;
+      if (currentLocation?.latitude != null && currentLocation?.longitude != null) {
+        final distance = _calculateDistance(
+          currentLocation!.latitude!,
+          currentLocation.longitude!,
+          emergency.location.latitude,
+          emergency.location.longitude,
+        );
+
+        final distanceKm = distance / 1000;
+        final estimatedTime = (distanceKm / 5.0 * 60).round(); // Assuming 5 km/h walking speed
+
+        // Log the volunteer response for development purposes
+        AppLogger.logInfo(
+          'Volunteer ${FirebaseAuth.instance.currentUser?.displayName} responding to emergency ${emergency.emergencyId}. '
+          'Distance: ${distance.round()}m, Estimated time: ${estimatedTime}min'
+        );
+
+        // Show notification to the volunteer about distance
+        _showTopSnackBar(
+          message: '📍 You are ${EmergencyManagementService.formatDistance(distance)} from the emergency',
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.navigation, color: Colors.white),
+        );
+
+        // TODO: Implement push notification to attendee
+        // NotificationService.sendToUser(
+        //   userId: emergency.attendeeId,
+        //   title: 'Help is on the way!',
+        //   body: 'A volunteer is approximately ${estimatedTime} minutes away.',
+        // );
+      }
+    } catch (e) {
+      AppLogger.logError('Error notifying attendee', e);
     }
+  }
+
+  // Top navigation AppBar removed per new UI. Helper methods were deleted.
+
+  /// Get current volunteer's response status for an emergency
+  EmergencyResponseStatus _getCurrentVolunteerStatus(Emergency emergency) {
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    print('🎯 DEBUG STATUS: Current user ID: $currentUserId');
+    
+    if (currentUserId == null) {
+      print('🎯 DEBUG STATUS: No user ID, returning notified');
+      return EmergencyResponseStatus.notified;
+    }
+
+    final response = emergency.responses[currentUserId];
+    print('🎯 DEBUG STATUS: Emergency responses: ${emergency.responses.keys.toList()}');
+    print('🎯 DEBUG STATUS: User response: ${response?.status.name ?? "null"}');
+    
+    if (response == null) {
+      print('🎯 DEBUG STATUS: No response found, returning notified');
+      return EmergencyResponseStatus.notified;
+    }
+
+    final mappedStatus = switch (response.status) {
+      EmergencyVolunteerStatus.notified => EmergencyResponseStatus.notified,
+      EmergencyVolunteerStatus.responding => EmergencyResponseStatus.responding,
+      EmergencyVolunteerStatus.enRoute => EmergencyResponseStatus.enRoute,
+      EmergencyVolunteerStatus.arrived => EmergencyResponseStatus.arrived,
+      EmergencyVolunteerStatus.verified => EmergencyResponseStatus.verified,
+      EmergencyVolunteerStatus.assisting => EmergencyResponseStatus.assisting,
+      EmergencyVolunteerStatus.completed => EmergencyResponseStatus.completed,
+      EmergencyVolunteerStatus.unavailable => EmergencyResponseStatus.unavailable,
+    };
+    
+    print('🎯 DEBUG STATUS: Mapped ${response.status.name} to ${mappedStatus.name}');
+    return mappedStatus;
   }
 
   /// Focus map on a specific location
@@ -1831,12 +2019,20 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     final hasVolunteers = emergency.responses.isNotEmpty;
     
     switch (emergency.status) {
-      case EmergencyStatus.active:
+      case EmergencyStatus.unverified:
         return hasVolunteers ? Colors.orange : Colors.red;
-      case EmergencyStatus.inProgress:
+      case EmergencyStatus.accepted:
         return Colors.blue;
+      case EmergencyStatus.inProgress:
+        return Colors.purple;
+      case EmergencyStatus.verified:
+        return Colors.red;
+      case EmergencyStatus.escalated:
+        return Colors.deepOrange;
       case EmergencyStatus.resolved:
         return Colors.green;
+      case EmergencyStatus.fake:
+        return Colors.grey;
     }
   }
 
@@ -1914,17 +2110,66 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   child: const Text('Close'),
                 ),
                 const SizedBox(width: 8),
-                if (_userRole == 'Volunteer' && 
-                    !emergency.responses.containsKey(FirebaseAuth.instance.currentUser?.uid))
-                  ElevatedButton(
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      setState(() {
-                        _currentEmergencyResponse = emergency;
-                      });
+                if (_userRole == 'Volunteer') ...[
+                  // DEBUG: Log button condition
+                  Builder(
+                    builder: (context) {
+                      final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+                      final hasResponse = emergency.responses.containsKey(currentUserId);
+                      print('🔍 DEBUG BUTTON: Current user ID: $currentUserId');
+                      print('🔍 DEBUG BUTTON: Emergency responses: ${emergency.responses.keys.toList()}');
+                      print('🔍 DEBUG BUTTON: Has response: $hasResponse');
+                      print('🔍 DEBUG BUTTON: Will show: ${hasResponse ? "View Response" : "Respond"} button');
+                      return Container();
                     },
-                    child: const Text('Respond'),
                   ),
+                  if (!emergency.responses.containsKey(FirebaseAuth.instance.currentUser?.uid))
+                    // Show Respond button for new volunteers
+                    ElevatedButton(
+                      onPressed: () async {
+                        Navigator.of(context).pop();
+                        await _initiateVolunteerResponse(emergency);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                      ),
+                      child: const Text('🚨 Respond'),
+                    )
+                  else
+                    // Show "View Response" button for volunteers already responding
+                    ElevatedButton(
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                        // Set this emergency as current response to show the card
+                        setState(() {
+                          _currentEmergencyResponse = emergency;
+                        });
+                        _focusOnLocation(emergency.location);
+                        
+                        // Debug: Log volunteer status
+                        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+                        if (currentUserId != null && emergency.responses.containsKey(currentUserId)) {
+                          final volunteerResponse = emergency.responses[currentUserId]!;
+                          print('🔍 DEBUG: Volunteer status: ${volunteerResponse.status.name}');
+                          print('🔍 DEBUG: Mapped to EmergencyResponseStatus: ${_getCurrentVolunteerStatus(emergency)}');
+                        }
+                        print('🔍 DEBUG: _currentEmergencyResponse set to: ${emergency.emergencyId}');
+                        
+                        _showTopSnackBar(
+                          message: '📱 Emergency response card activated. Swipe up for options.',
+                          backgroundColor: Colors.blue,
+                          duration: const Duration(seconds: 3),
+                          icon: const Icon(Icons.phone_android, color: Colors.white),
+                        );
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                      ),
+                      child: const Text('� View Response'),
+                    ),
+                ],
               ],
             ),
           ],
@@ -2013,23 +2258,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             child: const Text('Cancel'),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.of(context).pop();
-              // Immediately set this emergency as current response
-              setState(() {
-                _currentEmergencyResponse = emergency;
-              });
               
-              // Focus on emergency location
-              _focusOnLocation(emergency.location);
-              
-              // Show confirmation
-              _showTopSnackBar(
-                message: '🚨 Emergency response activated! Use the response card to update your status.',
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 4),
-                icon: const Icon(Icons.check_circle, color: Colors.white),
-              );
+              // FIXED: Use the same initiate response method
+              await _initiateVolunteerResponse(emergency);
             },
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,

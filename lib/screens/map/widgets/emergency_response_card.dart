@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:simha_link/models/emergency_response.dart';
 import 'package:simha_link/models/emergency.dart';
+import 'package:simha_link/services/emergency_management_service.dart';
 
 /// Enhanced emergency response card that communicates directly with the emergency database
 class EmergencyResponseCard extends StatefulWidget {
@@ -74,10 +75,27 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
       return const SizedBox.shrink();
     }
 
-    return Positioned(
-      bottom: 0,
-      left: 0,
-      right: 0,
+    // Debug: Log current status and next status
+    print('🎯 DEBUG CARD BUILD: Current status: ${widget.response!.status.name}');
+    print('🎯 DEBUG CARD BUILD: Next status: ${widget.response!.status.nextStatus?.name ?? "None"}');
+    print('🎯 DEBUG CARD BUILD: Is active: ${widget.response!.isActive}');
+
+    return GestureDetector(
+      onTap: _toggleCard,
+      onPanUpdate: (details) {
+        // Make the card respond to vertical swipes
+        if (details.delta.dy < -2) {
+          // Swiping up - expand
+          if (!_isExpanded) {
+            _toggleCard();
+          }
+        } else if (details.delta.dy > 2) {
+          // Swiping down - collapse
+          if (_isExpanded) {
+            _toggleCard();
+          }
+        }
+      },
       child: AnimatedBuilder(
         animation: _slideAnimation,
         builder: (context, child) {
@@ -117,75 +135,94 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
   }
 
   Widget _buildCardHeader() {
-    return GestureDetector(
-      onTap: _toggleCard,
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-        child: Column(
-          children: [
-            // Drag handle
-            Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey.shade300,
-                borderRadius: BorderRadius.circular(2),
-              ),
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      child: Column(
+        children: [
+          // Drag handle - more prominent
+          Container(
+            width: 50,
+            height: 6,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade400,
+              borderRadius: BorderRadius.circular(3),
             ),
-            
-            const SizedBox(height: 12),
-            
-            // Status and action row
-            Row(
-              children: [
-                // Status indicator
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: widget.response!.status.statusColor.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Icon(
-                    widget.response!.status.statusIcon,
-                    color: widget.response!.status.statusColor,
-                    size: 20,
-                  ),
+          ),
+          
+          const SizedBox(height: 12),
+          
+          // Status and action row
+          Row(
+            children: [
+              // Status indicator
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: widget.response!.status.statusColor.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                
-                const SizedBox(width: 12),
-                
-                // Status text
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.response!.status.displayName,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.black87,
-                        ),
+                child: Icon(
+                  widget.response!.status.statusIcon,
+                  color: widget.response!.status.statusColor,
+                  size: 16,
+                ),
+              ),
+              
+              const SizedBox(width: 12),
+              
+              // Status text and person name
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      widget.response!.status.displayName,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: widget.response!.status.statusColor,
+                        fontSize: 14,
                       ),
+                    ),
+                    if (widget.emergency != null)
                       Text(
-                        widget.response!.status.description,
+                        'Emergency: ${widget.emergency!.attendeeName}',
                         style: TextStyle(
                           fontSize: 12,
                           color: Colors.grey.shade600,
                         ),
                       ),
-                    ],
-                  ),
+                  ],
                 ),
+              ),
+              
+              // Quick action button
+              if (widget.response!.status.nextStatus != null)
+                _buildQuickActionButton(),
                 
-                // Action button (if next status available)
-                if (widget.response!.status.nextStatus != null)
-                  _buildQuickActionButton(),
-              ],
+              // Expand/collapse indicator
+              const SizedBox(width: 8),
+              Icon(
+                _isExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                color: Colors.grey.shade600,
+                size: 20,
+              ),
+            ],
+          ),
+          
+          // Swipe hint when collapsed
+          if (!_isExpanded) ...[
+            const SizedBox(height: 8),
+            Text(
+              'Swipe up or tap for details',
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey.shade500,
+                fontStyle: FontStyle.italic,
+              ),
             ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -244,7 +281,7 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
                 Icon(Icons.emergency, color: Colors.red, size: 20),
                 const SizedBox(width: 8),
                 Text(
-                  'Emergency Response',
+                  'Emergency Details',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
@@ -256,7 +293,18 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
             
             const SizedBox(height: 12),
             
-            _buildDetailRow(Icons.access_time, 'Started', _formatTimestamp(widget.response!.timestamp)),
+            // Emergency basic info
+            if (widget.emergency != null) ...[
+              _buildDetailRow(Icons.person, 'Person', widget.emergency!.attendeeName),
+              _buildDetailRow(Icons.location_on, 'Location', 
+                '${widget.emergency!.location.latitude.toStringAsFixed(6)}, ${widget.emergency!.location.longitude.toStringAsFixed(6)}'),
+              if (widget.emergency!.message != null && widget.emergency!.message!.isNotEmpty)
+                _buildDetailRow(Icons.message, 'Message', widget.emergency!.message!),
+              _buildDetailRow(Icons.info, 'Status', widget.emergency!.status.displayName),
+            ],
+            
+            // Response timing info
+            _buildDetailRow(Icons.access_time, 'Response Started', _formatTimestamp(widget.response!.timestamp)),
             
             if (widget.response!.distanceToEmergency != null)
               _buildDetailRow(
@@ -305,6 +353,7 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
       EmergencyResponseStatus.responding,
       EmergencyResponseStatus.enRoute,
       EmergencyResponseStatus.arrived,
+      EmergencyResponseStatus.verified,
       EmergencyResponseStatus.assisting,
       EmergencyResponseStatus.completed,
     ];
@@ -379,14 +428,117 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
   }
 
   Widget _buildActionButtons() {
+    // Special handling for assisting status - show escalate vs resolve options
+    if (widget.response!.status == EmergencyResponseStatus.assisting) {
+      return Column(
+        children: [
+          // Emergency Escalation vs Resolution choice
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.orange.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: Colors.orange.withOpacity(0.3)),
+            ),
+            child: const Text(
+              'Choose next action:',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          const SizedBox(height: 12),
+          
+          // Escalate button
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () => _showEscalationDialog(),
+              icon: const Icon(Icons.warning),
+              label: const Text('🚨 Escalate Emergency'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          
+          const SizedBox(height: 8),
+          
+          // Resolve button
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () => widget.onStatusUpdate?.call(EmergencyResponseStatus.completed),
+              icon: const Icon(Icons.check_circle),
+              label: const Text('✅ Mark as Resolved'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.green,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          
+          const SizedBox(height: 12),
+          
+          // Secondary actions
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: widget.onViewEmergency,
+                  icon: const Icon(Icons.location_on),
+                  label: const Text('View Location'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+              
+              const SizedBox(width: 12),
+              
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: widget.onCancel,
+                  icon: const Icon(Icons.cancel, color: Colors.red),
+                  label: const Text('Cancel', style: TextStyle(color: Colors.red)),
+                  style: OutlinedButton.styleFrom(
+                    side: const BorderSide(color: Colors.red),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    // Regular workflow progression for other statuses
     return Column(
       children: [
-        // Primary action button
+        // Primary action button for normal workflow progression
         if (widget.response!.status.nextStatus != null)
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: () => widget.onStatusUpdate?.call(widget.response!.status.nextStatus!),
+              onPressed: () {
+                final nextStatus = widget.response!.status.nextStatus!;
+                print('🎯 DEBUG CARD: Button pressed for status: ${nextStatus.name}');
+                print('🎯 DEBUG CARD: Current status: ${widget.response!.status.name}');
+                widget.onStatusUpdate?.call(nextStatus);
+              },
               icon: Icon(widget.response!.status.nextStatus!.statusIcon),
               label: Text(_getActionButtonText(widget.response!.status.nextStatus!)),
               style: ElevatedButton.styleFrom(
@@ -436,14 +588,101 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
     );
   }
 
+  void _showEscalationDialog() {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        String escalationReason = '';
+        return AlertDialog(
+          title: const Text('🚨 Escalate Emergency'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'This will escalate the emergency to higher authorities. Please provide a reason:',
+                style: TextStyle(fontSize: 14),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                onChanged: (value) => escalationReason = value,
+                decoration: const InputDecoration(
+                  hintText: 'Reason for escalation...',
+                  border: OutlineInputBorder(),
+                ),
+                maxLines: 3,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                // TODO: Implement escalation logic
+                _handleEscalation(escalationReason);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text('Escalate', style: TextStyle(color: Colors.white)),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _handleEscalation(String reason) async {
+    try {
+      // Use the existing escalation service
+      await EmergencyManagementService.volunteerVerifyEmergency(
+        emergencyId: widget.emergency!.emergencyId,
+        isReal: true,
+        markAsSerious: true,
+        escalationReason: reason,
+      );
+      
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('🚨 Emergency escalated: $reason'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 4),
+            action: SnackBarAction(
+              label: 'OK',
+              textColor: Colors.white,
+              onPressed: () {},
+            ),
+          ),
+        );
+        
+        // Update the card to reflect escalation
+        widget.onStatusUpdate?.call(EmergencyResponseStatus.completed);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('❌ Failed to escalate emergency: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
   String _getActionButtonText(EmergencyResponseStatus status) {
     switch (status) {
       case EmergencyResponseStatus.enRoute:
         return 'Start Journey';
       case EmergencyResponseStatus.arrived:
         return 'I\'ve Arrived';
+      case EmergencyResponseStatus.verified:
+        return 'Verify Emergency';
       case EmergencyResponseStatus.assisting:
-        return 'Start Helping';
+        return 'Start Assisting';
       case EmergencyResponseStatus.completed:
         return 'Mark Resolved';
       default:
