@@ -6,8 +6,10 @@ import 'package:simha_link/screens/auth_wrapper.dart';
 
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/screens/map_screen.dart';
+import 'package:simha_link/screens/solo_map_screen.dart';
 import 'package:simha_link/screens/profile_screen.dart';
 import 'package:simha_link/screens/group_chat_screen.dart';
+import 'package:simha_link/screens/feed/feed_screen.dart';
 import 'package:simha_link/services/auth_service.dart';
 import 'package:simha_link/services/emergency_communication_service.dart';
 import 'package:simha_link/utils/user_preferences.dart';
@@ -16,7 +18,7 @@ import 'package:simha_link/utils/user_preferences.dart';
 /// Main navigation container with a bottom navigation bar
 /// Handles routing between main screens and maintaining navigation state
 class MainNavigationScreen extends StatefulWidget {
-  final String groupId;
+  final String? groupId; // Made nullable to support solo mode
   
   const MainNavigationScreen({
     super.key,
@@ -29,7 +31,8 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _selectedIndex = 0;
-  late String _groupId;
+  String? _groupId; // Made nullable
+  bool _isInSoloMode = false;
   // _userRole removed - role-specific UI now handled elsewhere
   bool _isLoading = true;
   bool _isLeavingGroup = false;
@@ -39,12 +42,20 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   @override
   void initState() {
     super.initState();
+    print('[DEBUG] MainNavigationScreen: initState called');
     _groupId = widget.groupId;
+    _isInSoloMode = widget.groupId == null; // Initial check
+    print('[DEBUG] MainNavigationScreen: Group ID set to: $_groupId');
+    print('[DEBUG] MainNavigationScreen: Solo mode (initial): $_isInSoloMode');
+    _checkSoloMode(); // Async check that will update if needed
+    print('[DEBUG] MainNavigationScreen: Calling _getUserRole()');
     _getUserRole();
     // Aggressive fallback: listen for global auth state changes and
     // force navigation to the auth wrapper when the user signs out.
     _authSubscription = FirebaseAuth.instance.authStateChanges().listen((user) {
+      print('[DEBUG] MainNavigationScreen: Auth state changed - User: ${user?.uid ?? 'null'}');
       if (user == null) {
+        print('[DEBUG] MainNavigationScreen: User signed out, navigating to AuthWrapper');
         // Ensure this runs after the current frame to avoid navigation during build
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!mounted) return;
@@ -53,7 +64,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
               MaterialPageRoute(builder: (context) => const AuthWrapper()),
               (_) => false,
             );
-          } catch (_) {
+          } catch (e) {
+            print('[ERROR] MainNavigationScreen: Navigation error: $e');
             // ignore navigation errors - this is a best-effort fallback
           }
         });
@@ -67,18 +79,56 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     super.dispose();
   }
 
-  Future<void> _getUserRole() async {
+  Future<void> _checkSoloMode() async {
     try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
-
-      if (mounted) {
+      // Check both widget parameter and UserPreferences
+      final isInSoloModeFromPrefs = await UserPreferences.isUserInSoloMode();
+      final newSoloMode = widget.groupId == null || isInSoloModeFromPrefs;
+      
+      print('[DEBUG] MainNavigationScreen: Solo mode from prefs: $isInSoloModeFromPrefs');
+      print('[DEBUG] MainNavigationScreen: Final solo mode: $newSoloMode');
+      
+      if (mounted && newSoloMode != _isInSoloMode) {
         setState(() {
-          _isLoading = false;
+          _isInSoloMode = newSoloMode;
         });
       }
     } catch (e) {
+      print('[ERROR] MainNavigationScreen: Error checking solo mode: $e');
+      final fallbackSoloMode = widget.groupId == null;
+      if (mounted && fallbackSoloMode != _isInSoloMode) {
+        setState(() {
+          _isInSoloMode = fallbackSoloMode;
+        });
+      }
+    }
+  }
+
+  Future<void> _getUserRole() async {
+    print('[DEBUG] MainNavigationScreen: Starting _getUserRole()');
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        print('[DEBUG] MainNavigationScreen: No current user found');
+        return;
+      }
+      
+      print('[DEBUG] MainNavigationScreen: User found: ${user.uid}');
+      print('[DEBUG] MainNavigationScreen: Group ID: $_groupId');
+
       if (mounted) {
+        print('[DEBUG] MainNavigationScreen: Setting _isLoading = false');
+        setState(() {
+          _isLoading = false;
+        });
+        print('[DEBUG] MainNavigationScreen: _isLoading set to false successfully');
+      } else {
+        print('[DEBUG] MainNavigationScreen: Widget not mounted, skipping setState');
+      }
+    } catch (e) {
+      print('[ERROR] MainNavigationScreen: Error in _getUserRole: $e');
+      if (mounted) {
+        print('[DEBUG] MainNavigationScreen: Setting _isLoading = false due to error');
         setState(() {
           _isLoading = false;
         });
@@ -94,22 +144,41 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    print('[DEBUG] MainNavigationScreen: Build called - _isLoading: $_isLoading');
     // Check if it's a narrow screen (like a phone)
     final isPhone = MediaQuery.of(context).size.width < 600;
 
     return Scaffold(
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Center(child: CircularProgressIndicator()),
+                const SizedBox(height: 16),
+                Text(
+                  'Loading group data...',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Group ID: $_groupId',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            )
           : IndexedStack(
               index: _selectedIndex,
-              children: [
-                // Profile (left)
+              children: _isInSoloMode ? [
+                // Solo mode pages
                 const ProfileScreen(),
-
-                // Map (middle)
-                MapScreen(groupId: _groupId),
-
-                // Group Chat (right)
+                const SoloMapScreen(),
+                const FeedScreen(),
+                GroupChatScreen(groupId: _groupId), // null groupId for solo mode
+              ] : [
+                // Group mode pages
+                const ProfileScreen(),
+                MapScreen(groupId: _groupId!), // Safe to use ! here since not in solo mode
+                const FeedScreen(),
                 GroupChatScreen(groupId: _groupId),
               ],
             ),
@@ -126,6 +195,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   Widget _buildBottomNavigationBar() {
     return BottomNavigationBar(
+      type: BottomNavigationBarType.fixed, // Add this to show all tabs
       currentIndex: _selectedIndex,
       onTap: _onItemTapped,
       selectedItemColor: Colors.red,
@@ -138,6 +208,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
         const BottomNavigationBarItem(
           icon: Icon(Icons.map),
           label: 'Map',
+        ),
+        const BottomNavigationBarItem(
+          icon: Icon(Icons.feed),
+          label: 'Feed',
         ),
         BottomNavigationBarItem(
           icon: _buildBadgedIcon(
@@ -326,13 +400,13 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       );
       
       final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
+      if (user == null || _groupId == null) {
         Navigator.pop(context); // Close loading dialog
         return;
       }
       
       // Leave group and clean up
-      await UserPreferences.leaveGroupAndCleanup(_groupId, user.uid);
+      await UserPreferences.leaveGroupAndCleanup(_groupId!, user.uid);
       
       if (mounted) {
         // Close loading dialog

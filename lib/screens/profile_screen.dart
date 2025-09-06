@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:simha_link/services/auth_service.dart';
 import 'package:simha_link/services/group_management_service.dart';
 import 'package:simha_link/utils/user_preferences.dart';
 import 'package:simha_link/screens/group_creation_screen.dart';
 import 'package:simha_link/screens/group_info_screen.dart';
 import 'package:simha_link/screens/auth_wrapper.dart';
-import 'package:simha_link/widgets/app_snackbar.dart';
 import 'package:simha_link/core/utils/app_logger.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -19,34 +19,85 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   User? _user;
   String? _groupId;
+  String? _groupName;
+  String? _userRole;
+  String? _displayName;
   bool _loading = true;
 
   @override
   void initState() {
     super.initState();
     _user = FirebaseAuth.instance.currentUser;
-    _loadGroup();
+    _loadUserData();
   }
 
-  Future<void> _loadGroup() async {
+  Future<void> _loadUserData() async {
     if (_user == null) return;
-    final gid = await UserPreferences.getUserGroupId();
-    if (!mounted) return;
-    setState(() {
-      _groupId = gid;
-      _loading = false;
-    });
+    
+    try {
+      // Load group ID from preferences
+      final groupId = await UserPreferences.getUserGroupId();
+      
+      // Fetch user data from Firestore
+      final userDoc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(_user!.uid)
+          .get();
+      
+      String? userRole;
+      String? displayName;
+      
+      if (userDoc.exists) {
+        final userData = userDoc.data()!;
+        userRole = userData['role'] as String?;
+        displayName = userData['displayName'] as String?;
+      }
+      
+      // Fetch group name if user is in a group
+      String? groupName;
+      if (groupId != null) {
+        try {
+          final groupInfo = await GroupManagementService.getGroupInfo(groupId);
+          groupName = groupInfo?.name;
+        } catch (e) {
+          AppLogger.logError('Error fetching group info', e);
+        }
+      }
+      
+      if (!mounted) return;
+      setState(() {
+        _groupId = groupId;
+        _groupName = groupName;
+        _userRole = userRole ?? 'Participant';
+        _displayName = displayName ?? _user?.displayName;
+        _loading = false;
+      });
+    } catch (e) {
+      AppLogger.logError('Error loading user data', e);
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+      });
+    }
   }
 
   Future<void> _handleLogout() async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('Logout?'),
-        content: const Text('You will be signed out of your account.'),
+        backgroundColor: Colors.grey[900],
+        title: const Text('Logout?', style: TextStyle(color: Colors.white)),
+        content: const Text('You will be signed out of your account.', style: TextStyle(color: Colors.white70)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('CANCEL')),
-          FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('LOGOUT')),
+          TextButton(
+            onPressed: () => Navigator.pop(c, false), 
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white70))
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(c, true), 
+            child: const Text('LOGOUT')
+          ),
         ],
       ),
     );
@@ -61,9 +112,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (c) => const AlertDialog(
-        content: Row(
-          children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Logging out...')],
+      builder: (c) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        content: const Row(
+          children: [
+            CircularProgressIndicator(color: Colors.white), 
+            SizedBox(width: 20), 
+            Text('Logging out...', style: TextStyle(color: Colors.white))
+          ],
         ),
       ),
     );
@@ -99,12 +155,92 @@ class _ProfileScreenState extends State<ProfileScreen> {
       Navigator.pushReplacement(context, MaterialPageRoute(builder: (c) => const GroupCreationScreen()));
       return;
     }
-    Navigator.push(context, MaterialPageRoute(builder: (c) => GroupInfoScreen(groupId: _groupId!))).then((_) => _loadGroup());
+    Navigator.push(context, MaterialPageRoute(builder: (c) => GroupInfoScreen(groupId: _groupId!))).then((_) => _loadUserData());
+  }
+
+  Future<void> _handleLeaveGroup() async {
+    if (_groupId == null) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('Leave Group?', style: TextStyle(color: Colors.white)),
+        content: Text(
+          'Are you sure you want to leave "${_groupName ?? _groupId}"? You will lose access to group messages and locations.',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(c, false),
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white70)),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+            onPressed: () => Navigator.pop(c, true),
+            child: const Text('LEAVE GROUP'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    // Show loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        content: const Row(
+          children: [
+            CircularProgressIndicator(color: Colors.white),
+            SizedBox(width: 20),
+            Text('Leaving group...', style: TextStyle(color: Colors.white)),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      final user = _user;
+      if (user == null) {
+        Navigator.of(context).pop(); // Dismiss loading dialog
+        return;
+      }
+
+      // Use the same method as working implementations
+      await UserPreferences.leaveGroupAndCleanup(_groupId!, user.uid);
+      
+      // Dismiss loading dialog
+      Navigator.of(context).pop();
+      
+      // Reload user data to update UI
+      _loadUserData();
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('You have left the group'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      // Dismiss loading dialog
+      Navigator.of(context).pop();
+      
+      AppLogger.logError('Error leaving group', e);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error leaving group: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final displayName = _user?.displayName ?? _user?.email?.split('@').first ?? 'User';
+    final displayName = _displayName ?? _user?.displayName ?? _user?.email?.split('@').first ?? 'User';
     final email = _user?.email ?? '';
 
     return Scaffold(
@@ -122,73 +258,148 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  ListTile(
-                    tileColor: Colors.grey[900],
+                  // User Profile Card
+                  Card(
+                    color: Colors.grey[900],
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    leading: CircleAvatar(
-                      backgroundColor: Colors.white,
-                      child: Text(
-                        displayName.isNotEmpty ? displayName[0].toUpperCase() : '?',
-                        style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: Colors.white,
+                        child: Text(
+                          displayName.isNotEmpty ? displayName[0].toUpperCase() : '?',
+                          style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold),
+                        ),
+                      ),
+                      title: Text(
+                        displayName,
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(email, style: const TextStyle(color: Colors.white70)),
+                          const SizedBox(height: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: _getRoleColor(_userRole ?? 'Participant'),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              _userRole ?? 'Participant',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    title: Text(
-                      displayName,
-                      style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
-                    ),
-                    subtitle: Text(email, style: const TextStyle(color: Colors.white70)),
                   ),
                   const SizedBox(height: 24),
+                  
+                  // Group Section
                   Text('Group:', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white)),
                   const SizedBox(height: 8),
-                  _groupId == null
-                      ? Row(
-                          children: [
-                            const Text('Not in a group', style: TextStyle(color: Colors.white70)),
-                            const SizedBox(width: 12),
-                            FilledButton(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Colors.black,
-                              ),
-                              onPressed: () => Navigator.pushReplacement(
-                                  context, MaterialPageRoute(builder: (c) => const GroupCreationScreen())),
-                              child: const Text('Create / Join'),
+                  Card(
+                    color: Colors.grey[900],
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: _groupId == null
+                          ? Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text('Not in a group', style: TextStyle(color: Colors.white70)),
+                                const SizedBox(height: 12),
+                                SizedBox(
+                                  width: double.infinity,
+                                  child: FilledButton(
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: Colors.white,
+                                      foregroundColor: Colors.black,
+                                    ),
+                                    onPressed: () => Navigator.pushReplacement(
+                                        context, MaterialPageRoute(builder: (c) => const GroupCreationScreen())),
+                                    child: const Text('Create / Join Group'),
+                                  ),
+                                ),
+                              ],
                             )
-                          ],
-                        )
-                      : Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(_groupId!, style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white)),
-                            TextButton(
-                              onPressed: _openGroupInfo,
-                              style: TextButton.styleFrom(foregroundColor: Colors.white),
-                              child: const Text('Group Info'),
-                            )
-                          ],
-                        ),
-                  const Spacer(),
-                  FilledButton.tonal(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.grey[900],
-                      foregroundColor: Colors.white,
+                          : Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Group: ${_groupName ?? _groupId}',
+                                  style: const TextStyle(fontWeight: FontWeight.w500, color: Colors.white, fontSize: 16),
+                                ),
+                                const SizedBox(height: 12),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: _openGroupInfo,
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: Colors.white,
+                                          side: const BorderSide(color: Colors.white70),
+                                        ),
+                                        child: const Text('Group Info'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: FilledButton(
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor: Colors.orange,
+                                        ),
+                                        onPressed: _handleLeaveGroup,
+                                        child: const Text('Leave Group'),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
                     ),
-                    onPressed: _openGroupInfo,
-                    child: const Text('Group Info'),
                   ),
-                  const SizedBox(height: 12),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.black,
+                  
+                  const Spacer(),
+                  
+                  // Centered Logout Button
+                  Center(
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.red,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                        ),
+                        onPressed: _handleLogout,
+                        child: const Text('Logout', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                      ),
                     ),
-                    onPressed: _handleLogout,
-                    child: const Text('Logout'),
                   ),
                 ],
               ),
             ),
     );
+  }
+
+  Color _getRoleColor(String role) {
+    switch (role.toLowerCase()) {
+      case 'organizer':
+        return Colors.purple;
+      case 'volunteer':
+        return Colors.green;
+      case 'vip':
+        return Colors.orange;
+      case 'participant':
+        return Colors.blue;
+      default:
+        return Colors.grey;
+    }
   }
 }
