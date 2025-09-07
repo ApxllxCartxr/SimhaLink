@@ -220,10 +220,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
       
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('You have left the group'),
+          content: Text('You have left the group. Restarting app...'),
           backgroundColor: Colors.green,
         ),
       );
+      
+      // Navigate back to AuthWrapper to restart the app flow with updated group status
+      Future.delayed(const Duration(seconds: 1), () {
+        if (mounted) {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (ctx) => const AuthWrapper()),
+            (route) => false,
+          );
+        }
+      });
     } catch (e) {
       // Dismiss loading dialog
       Navigator.of(context).pop();

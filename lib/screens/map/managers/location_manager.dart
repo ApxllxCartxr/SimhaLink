@@ -12,12 +12,12 @@ class LocationManager {
   StreamSubscription<LocationData>? _locationSubscription;
   
   LocationData? currentLocation;
-  final String groupId;
+  final String? groupId; // Made nullable for solo mode
   String? userRole;
   bool isEmergency;
   
   LocationManager({
-    required this.groupId,
+    this.groupId, // Can be null for solo mode
     this.userRole,
     this.isEmergency = false,
   });
@@ -89,14 +89,25 @@ class LocationManager {
 
       debugPrint('📍 Updating user location - Emergency: $isEmergency (User: ${location.userName})');
 
-      await FirebaseFirestore.instance
-          .collection('groups')
-          .doc(groupId)
-          .collection('locations')
-          .doc(user.uid)
-          .set(location.toMap());
-          
-      debugPrint('✅ Location updated successfully in group $groupId - Emergency: $isEmergency');
+      if (groupId != null) {
+        // Group mode - store in group's locations collection (existing behavior)
+        await FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId!)
+            .collection('locations')
+            .doc(user.uid)
+            .set(location.toMap());
+            
+        debugPrint('✅ Location updated successfully in group $groupId - Emergency: $isEmergency');
+      } else {
+        // Solo mode - store in separate solo locations collection
+        await FirebaseFirestore.instance
+            .collection('solo_user_locations')
+            .doc(user.uid)
+            .set(location.toMap());
+            
+        debugPrint('✅ Location updated successfully in solo mode - Emergency: $isEmergency');
+      }
     } catch (e) {
       debugPrint('Error updating user location: $e');
       rethrow;

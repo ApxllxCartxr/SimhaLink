@@ -7,6 +7,7 @@ import '../../services/firebase_service.dart';
 import 'widgets/feed_post_widget.dart';
 import 'widgets/create_post_widget.dart';
 import 'widgets/hashtag_filter_widget.dart';
+import 'widgets/transport_tab_widget.dart';
 import 'post_detail_screen.dart';
 
 class FeedScreen extends StatefulWidget {
@@ -21,19 +22,28 @@ class _FeedScreenState extends State<FeedScreen>
   late TabController _tabController;
   String? _selectedHashtag;
   List<String> _trendingHashtags = [];
+  int _currentTabIndex = 0;
 
   @override
   void initState() {
     super.initState();
     print('🐛 FeedScreen: initState called');
     _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(_onTabChanged);
     _loadTrendingHashtags();
   }
 
   @override
   void dispose() {
+    _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
     super.dispose();
+  }
+
+  void _onTabChanged() {
+    setState(() {
+      _currentTabIndex = _tabController.index;
+    });
   }
 
   Future<void> _loadTrendingHashtags() async {
@@ -117,12 +127,13 @@ class _FeedScreenState extends State<FeedScreen>
   Widget _buildMainUI(UserProfile user) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_getScreenTitle(user)),
         bottom: TabBar(
           controller: _tabController,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white.withOpacity(0.7),
           tabs: const [
             Tab(text: 'Posts'),
-            Tab(text: 'Trending'),
+            Tab(text: 'Transport'),
           ],
         ),
       ),
@@ -130,28 +141,16 @@ class _FeedScreenState extends State<FeedScreen>
         controller: _tabController,
         children: [
           _buildAllPostsTab(user),
-          _buildTrendingTab(user),
+          TransportTabWidget(user: user),
         ],
       ),
-      floatingActionButton: _canUserCreatePost(user)
+      floatingActionButton: (_currentTabIndex == 0 && _canUserCreatePost(user))
           ? FloatingActionButton(
               onPressed: () => _showCreatePostDialog(context, user),
               child: const Icon(Icons.add),
             )
           : null,
     );
-  }
-
-  String _getScreenTitle(UserProfile user) {
-    switch (user.role) {
-      case UserRole.participant:
-        return 'Community Feed';
-      case UserRole.volunteer:
-      case UserRole.organizer:
-        return 'Attendee Feed';
-      default:
-        return 'Feed';
-    }
   }
 
   bool _canUserCreatePost(UserProfile user) {
@@ -273,26 +272,6 @@ class _FeedScreenState extends State<FeedScreen>
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildTrendingTab(UserProfile user) {
-    return ListView.builder(
-      itemCount: _trendingHashtags.length,
-      itemBuilder: (context, index) {
-        final hashtag = _trendingHashtags[index];
-        return ListTile(
-          leading: const Icon(Icons.trending_up),
-          title: Text('#$hashtag'),
-          subtitle: const Text('Trending topic'),
-          onTap: () {
-            setState(() {
-              _selectedHashtag = hashtag;
-              _tabController.animateTo(0);
-            });
-          },
-        );
-      },
     );
   }
 

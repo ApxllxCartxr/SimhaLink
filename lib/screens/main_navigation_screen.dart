@@ -38,16 +38,18 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   bool _isLeavingGroup = false;
   bool _isLoggingOut = false;
   StreamSubscription<User?>? _authSubscription;
+  Timer? _groupStatusTimer;
 
   @override
   void initState() {
     super.initState();
     print('[DEBUG] MainNavigationScreen: initState called');
     _groupId = widget.groupId;
-    _isInSoloMode = widget.groupId == null; // Initial check
+    _isInSoloMode = widget.groupId == null || widget.groupId!.isEmpty; // Initial check - if no valid group ID, solo mode
     print('[DEBUG] MainNavigationScreen: Group ID set to: $_groupId');
     print('[DEBUG] MainNavigationScreen: Solo mode (initial): $_isInSoloMode');
     _checkSoloMode(); // Async check that will update if needed
+    _startGroupStatusMonitoring(); // Start monitoring for group status changes
     print('[DEBUG] MainNavigationScreen: Calling _getUserRole()');
     _getUserRole();
     // Aggressive fallback: listen for global auth state changes and
@@ -76,14 +78,54 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   @override
   void dispose() {
     _authSubscription?.cancel();
+    _groupStatusTimer?.cancel();
     super.dispose();
+  }
+
+  void _startGroupStatusMonitoring() {
+    // Check for group status changes every 2 seconds
+    _groupStatusTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      
+      try {
+        final currentGroupId = await UserPreferences.getUserGroupId();
+        
+        // Check if group status has changed
+        if (currentGroupId != _groupId) {
+          print('[DEBUG] MainNavigationScreen: Group status changed from $_groupId to $currentGroupId');
+          
+          setState(() {
+            _groupId = currentGroupId;
+            _isInSoloMode = currentGroupId == null || currentGroupId.isEmpty;
+          });
+          
+          print('[DEBUG] MainNavigationScreen: Updated to solo mode: $_isInSoloMode');
+        }
+      } catch (e) {
+        print('[ERROR] MainNavigationScreen: Error monitoring group status: $e');
+      }
+    });
   }
 
   Future<void> _checkSoloMode() async {
     try {
-      // Check both widget parameter and UserPreferences
+      // If user has a valid group ID, they should NOT be in solo mode
+      if (widget.groupId != null && widget.groupId!.isNotEmpty) {
+        print('[DEBUG] MainNavigationScreen: User has group ID, setting solo mode to false');
+        if (mounted && _isInSoloMode) {
+          setState(() {
+            _isInSoloMode = false;
+          });
+        }
+        return;
+      }
+      
+      // Only check UserPreferences if no group ID is provided
       final isInSoloModeFromPrefs = await UserPreferences.isUserInSoloMode();
-      final newSoloMode = widget.groupId == null || isInSoloModeFromPrefs;
+      final newSoloMode = true; // If no group ID, definitely solo mode
       
       print('[DEBUG] MainNavigationScreen: Solo mode from prefs: $isInSoloModeFromPrefs');
       print('[DEBUG] MainNavigationScreen: Final solo mode: $newSoloMode');
@@ -95,7 +137,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       }
     } catch (e) {
       print('[ERROR] MainNavigationScreen: Error checking solo mode: $e');
-      final fallbackSoloMode = widget.groupId == null;
+      final fallbackSoloMode = widget.groupId == null || widget.groupId!.isEmpty;
       if (mounted && fallbackSoloMode != _isInSoloMode) {
         setState(() {
           _isInSoloMode = fallbackSoloMode;
