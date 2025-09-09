@@ -12,6 +12,7 @@ class EmergencyResponseCard extends StatefulWidget {
   final Function(EmergencyResponseStatus)? onStatusUpdate;
   final VoidCallback? onViewEmergency;
   final VoidCallback? onCancel;
+  final VoidCallback? onReportFakeAlarm;
   final LatLng? volunteerLocation;
 
   const EmergencyResponseCard({
@@ -21,6 +22,7 @@ class EmergencyResponseCard extends StatefulWidget {
     this.onStatusUpdate,
     this.onViewEmergency,
     this.onCancel,
+    this.onReportFakeAlarm,
     this.volunteerLocation,
   });
 
@@ -481,6 +483,25 @@ class _EmergencyResponseCardState extends State<EmergencyResponseCard> with Tick
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.green,
                 foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ),
+          
+          const SizedBox(height: 8),
+          
+          // False alarm button
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () => widget.onReportFakeAlarm?.call(),
+              icon: const Icon(Icons.report_problem),
+              label: const Text('⚠️ Report False Alarm'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: Colors.orange,
+                side: const BorderSide(color: Colors.orange, width: 2),
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

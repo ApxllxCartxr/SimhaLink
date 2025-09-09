@@ -4,6 +4,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:location/location.dart';
 import 'package:simha_link/models/emergency.dart';
 import 'package:simha_link/services/emergency_database_service.dart';
+import 'package:simha_link/services/in_app_notification_service.dart';
 import 'package:simha_link/core/utils/app_logger.dart';
 
 /// High-level service for managing emergency workflow and real-time updates
@@ -14,18 +15,8 @@ class EmergencyManagementService {
   static String? _currentVolunteerId;
   static StreamSubscription<LocationData>? _locationSubscription;
   
-  // Callbacks for UI updates
-  static Function(List<Emergency>)? _onEmergenciesUpdated;
-  static Function(Emergency?)? _onVolunteerResponseUpdated;
-  
   /// Initialize the emergency management service
-  static Future<void> initialize({
-    Function(List<Emergency>)? onEmergenciesUpdated,
-    Function(Emergency?)? onVolunteerResponseUpdated,
-  }) async {
-    _onEmergenciesUpdated = onEmergenciesUpdated;
-    _onVolunteerResponseUpdated = onVolunteerResponseUpdated;
-    
+  static Future<void> initialize() async {
     AppLogger.logInfo('EmergencyManagementService initialized');
   }
 
@@ -364,8 +355,6 @@ class EmergencyManagementService {
   static Future<void> dispose() async {
     try {
       await _stopVolunteerLocationTracking();
-      _onEmergenciesUpdated = null;
-      _onVolunteerResponseUpdated = null;
       
       AppLogger.logInfo('EmergencyManagementService disposed');
     } catch (e) {
@@ -522,5 +511,673 @@ class EmergencyManagementService {
       AppLogger.logError('Error getting current volunteer emergency', e);
       return null;
     }
+  }
+
+  // =====================================================================
+  // ENHANCED ATTENDEE NOTIFICATION AND DUAL RESOLUTION SYSTEM
+  // =====================================================================
+
+  /// Notify attendee of volunteer status changes
+  static Future<void> notifyAttendeeOfVolunteerStatus({
+    required String emergencyId,
+    required String volunteerId,
+    required String volunteerName,
+    required EmergencyVolunteerStatus newStatus,
+    LatLng? volunteerLocation,
+  }) async {
+    try {
+      print('🔔 DEBUG: Starting notification process for emergency: $emergencyId');
+      print('👤 DEBUG: Volunteer: $volunteerName, Status: ${newStatus.name}');
+      
+      // CRITICAL FIX: Update the volunteer status in the emergency FIRST
+      // This ensures the real-time listeners pick up the change
+      await EmergencyDatabaseService.updateVolunteerStatus(
+        emergencyId: emergencyId,
+        volunteerId: volunteerId,
+        status: newStatus,
+        currentLocation: volunteerLocation,
+      );
+      
+      print('✅ DEBUG: Volunteer status updated in database');
+      
+      // Get emergency details AFTER updating volunteer status
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) {
+        print('❌ DEBUG: Emergency not found: $emergencyId');
+        return;
+      }
+
+      print('✅ DEBUG: Emergency found, current notifications: ${emergency.attendeeNotifications.length}');
+      print('👥 DEBUG: Current volunteer responses: ${emergency.responses.length}');
+
+      // Calculate distance if volunteer location available
+      String locationInfo = '';
+      if (volunteerLocation != null) {
+        final distance = calculateDistanceToEmergency(volunteerLocation, emergency.location);
+        locationInfo = ' (${formatDistance(distance)})';
+      }
+
+      // Create status message
+      final statusMessage = _getStatusMessageForAttendee(newStatus, volunteerName, locationInfo);
+      print('📝 DEBUG: Status message: $statusMessage');
+
+      // Create notification object
+      final notification = AttendeeNotification(
+        timestamp: DateTime.now(),
+        volunteerId: volunteerId,
+        volunteerName: volunteerName,
+        status: newStatus.name,
+        message: statusMessage,
+        volunteerLocation: volunteerLocation,
+      );
+
+      print('📮 DEBUG: Created notification for volunteer: $volunteerName');
+
+      // Update emergency with attendee notification
+      final updatedNotifications = List<AttendeeNotification>.from(emergency.attendeeNotifications);
+      updatedNotifications.add(notification);
+
+      print('📋 DEBUG: Updated notifications count: ${updatedNotifications.length}');
+
+      // CRITICAL: Force update with new timestamp to trigger Firestore listeners
+      await EmergencyDatabaseService.updateEmergency(
+        emergencyId,
+        emergency.copyWith(
+          attendeeNotifications: updatedNotifications,
+          updatedAt: DateTime.now(), // Force timestamp update
+          // IMPORTANT: Ensure volunteer responses are preserved
+          responses: emergency.responses,
+        ),
+      );
+
+      print('💾 DEBUG: Emergency updated in database successfully');
+      print('🔄 DEBUG: This should trigger real-time listeners');
+      AppLogger.logInfo('Attendee notified: $statusMessage');
+    } catch (e) {
+      print('❌ DEBUG: Error in notification: $e');
+      AppLogger.logError('Error notifying attendee of volunteer status', e);
+    }
+  }
+
+  /// Get status message for attendee notifications
+  static String _getStatusMessageForAttendee(
+    EmergencyVolunteerStatus status,
+    String volunteerName,
+    String locationInfo,
+  ) {
+    switch (status) {
+      case EmergencyVolunteerStatus.responding:
+        return '🚨 $volunteerName is responding to your emergency$locationInfo';
+      case EmergencyVolunteerStatus.enRoute:
+        return '🏃 $volunteerName is on their way$locationInfo';
+      case EmergencyVolunteerStatus.arrived:
+        return '📍 $volunteerName has arrived at your location';
+      case EmergencyVolunteerStatus.verified:
+        return '✅ $volunteerName confirmed your emergency is real';
+      case EmergencyVolunteerStatus.assisting:
+        return '🤝 $volunteerName is now assisting you';
+      case EmergencyVolunteerStatus.completed:
+        return '✅ $volunteerName has completed their assistance';
+      default:
+        return '$volunteerName updated their status to ${status.name}';
+    }
+  }
+
+  /// Enhanced attendee mark resolved (dual resolution system)
+  static Future<void> attendeeMarkResolved({
+    required String emergencyId,
+    String? notes,
+  }) async {
+    try {
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      // Update attendee resolution status
+      final updatedResolution = emergency.resolvedBy.copyWith(
+        attendee: true,
+        attendeeResolvedAt: DateTime.now(),
+        attendeeResolutionNotes: notes,
+      );
+
+      final updatedEmergency = emergency.copyWith(
+        resolvedBy: updatedResolution,
+        updatedAt: DateTime.now(),
+      );
+
+      await EmergencyDatabaseService.updateEmergency(emergencyId, updatedEmergency);
+
+      // Check if emergency can be fully resolved
+      if (updatedResolution.canBeFullyResolved) {
+        // Both parties have resolved - mark as fully resolved
+        await _fullyResolveEmergency(emergencyId, emergency.groupId);
+        
+        // Notify all volunteers
+        await _notifyVolunteersOfFullResolution(emergency);
+      } else {
+        // Notify volunteers that attendee has marked as resolved
+        await _notifyVolunteersAttendeeResolved(emergency);
+      }
+
+      // Stop location tracking for attendee
+      await _stopAttendeeLocationTracking();
+
+      AppLogger.logInfo('Attendee marked emergency as resolved: $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error marking emergency as resolved by attendee', e);
+      rethrow;
+    }
+  }
+
+  /// Enhanced volunteer mark resolved (dual resolution system)
+  static Future<void> volunteerMarkResolved({
+    required String emergencyId,
+    String? notes,
+  }) async {
+    try {
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) throw Exception('User not authenticated');
+
+      // Create volunteer resolution
+      final volunteerResolution = VolunteerResolution(
+        volunteerId: currentUser.uid,
+        volunteerName: currentUser.displayName ?? 'Unknown Volunteer',
+        resolvedAt: DateTime.now(),
+        notes: notes,
+      );
+
+      // Update volunteer resolution status
+      final updatedVolunteerResolutions = Map<String, VolunteerResolution>.from(
+        emergency.resolvedBy.volunteerResolutions,
+      );
+      updatedVolunteerResolutions[currentUser.uid] = volunteerResolution;
+
+      final updatedResolution = emergency.resolvedBy.copyWith(
+        hasVolunteerCompleted: true,
+        lastVolunteerResolvedAt: DateTime.now(),
+        volunteerResolutions: updatedVolunteerResolutions,
+      );
+
+      final updatedEmergency = emergency.copyWith(
+        resolvedBy: updatedResolution,
+        updatedAt: DateTime.now(),
+      );
+
+      await EmergencyDatabaseService.updateEmergency(emergencyId, updatedEmergency);
+
+      // Check if emergency can be fully resolved
+      if (updatedResolution.canBeFullyResolved) {
+        // Both parties have resolved - mark as fully resolved
+        await _fullyResolveEmergency(emergencyId, emergency.groupId);
+        
+        // Notify attendee of full resolution
+        await _notifyAttendeeOfFullResolution(emergency);
+      } else {
+        // Notify attendee that volunteer has marked as resolved
+        await _notifyAttendeeVolunteerResolved(emergency, currentUser);
+      }
+
+      AppLogger.logInfo('Volunteer marked emergency as resolved: $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error marking emergency as resolved by volunteer', e);
+      rethrow;
+    }
+  }
+
+  /// Fully resolve emergency when both parties agree
+  static Future<void> _fullyResolveEmergency(String emergencyId, String groupId) async {
+    await EmergencyDatabaseService.updateEmergencyStatus(
+      emergencyId,
+      EmergencyStatus.resolved,
+      fullyResolvedAt: DateTime.now(),
+    );
+    
+    AppLogger.logInfo('Emergency fully resolved: $emergencyId');
+  }
+
+  /// Notify volunteers of full resolution
+  static Future<void> _notifyVolunteersOfFullResolution(Emergency emergency) async {
+    // Implementation can be added for push notifications or other alerts
+    AppLogger.logInfo('Volunteers notified of full resolution: ${emergency.emergencyId}');
+  }
+
+  /// Notify attendee of full resolution
+  static Future<void> _notifyAttendeeOfFullResolution(Emergency emergency) async {
+    // Implementation can be added for push notifications or other alerts
+    AppLogger.logInfo('Attendee notified of full resolution: ${emergency.emergencyId}');
+  }
+
+  /// Notify volunteers that attendee has resolved
+  static Future<void> _notifyVolunteersAttendeeResolved(Emergency emergency) async {
+    // Implementation can be added for push notifications or other alerts
+    AppLogger.logInfo('Volunteers notified attendee resolved: ${emergency.emergencyId}');
+  }
+
+  /// Notify attendee that volunteer has resolved
+  static Future<void> _notifyAttendeeVolunteerResolved(Emergency emergency, User volunteer) async {
+    final notification = AttendeeNotification(
+      timestamp: DateTime.now(),
+      volunteerId: volunteer.uid,
+      volunteerName: volunteer.displayName ?? 'Unknown Volunteer',
+      status: 'completed',
+      message: '✅ ${volunteer.displayName ?? 'Volunteer'} has marked your emergency as resolved. Please confirm if you agree.',
+    );
+
+    // Add notification to emergency
+    final updatedNotifications = List<AttendeeNotification>.from(emergency.attendeeNotifications);
+    updatedNotifications.add(notification);
+
+    await EmergencyDatabaseService.updateEmergency(
+      emergency.emergencyId,
+      emergency.copyWith(
+        attendeeNotifications: updatedNotifications,
+        updatedAt: DateTime.now(),
+      ),
+    );
+
+    AppLogger.logInfo('Attendee notified volunteer resolved: ${emergency.emergencyId}');
+  }
+
+  // ========== Enhanced Resolution & Cancellation System ==========
+
+  /// Enhanced attendee resolution with in-app notifications
+  static Future<void> attendeeResolveEmergencyV2({
+    required String emergencyId,
+    String? notes,
+  }) async {
+    try {
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) throw Exception('User not authenticated');
+
+      // Update attendee resolution status
+      final updatedResolution = emergency.resolvedBy.copyWith(
+        attendee: true,
+        attendeeResolvedAt: DateTime.now(),
+        attendeeResolutionNotes: notes,
+      );
+
+      final updatedEmergency = emergency.copyWith(
+        resolvedBy: updatedResolution,
+        updatedAt: DateTime.now(),
+      );
+
+      await EmergencyDatabaseService.updateEmergency(emergencyId, updatedEmergency);
+
+      // Check if emergency can be fully resolved
+      if (updatedResolution.canBeFullyResolved) {
+        // Both parties have resolved - mark as fully resolved
+        await _fullyResolveEmergency(emergencyId, emergency.groupId);
+        
+        // Show completion notification
+        InAppNotificationService.instance.showResolutionNotification(
+          title: '🎉 Emergency Resolved!',
+          message: 'Your emergency has been fully resolved by both you and the volunteer.',
+          emergencyId: emergencyId,
+          isComplete: true,
+        );
+        
+        // Notify all volunteers
+        await _notifyVolunteersOfFullResolution(emergency);
+      } else {
+        // Show partial resolution notification
+        InAppNotificationService.instance.showResolutionNotification(
+          title: '✅ Marked as Resolved',
+          message: 'Waiting for volunteer confirmation to complete resolution.',
+          emergencyId: emergencyId,
+          isComplete: false,
+        );
+        
+        // Notify volunteers that attendee has marked as resolved
+        await _notifyVolunteersAttendeeResolved(emergency);
+      }
+
+      // Stop location tracking for attendee
+      await _stopAttendeeLocationTracking();
+
+      AppLogger.logInfo('Attendee marked emergency as resolved: $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error marking emergency as resolved by attendee', e);
+      
+      // Show error notification
+      InAppNotificationService.instance.showNotification(
+        title: '❌ Resolution Failed',
+        message: 'Failed to mark emergency as resolved. Please try again.',
+        type: InAppNotificationType.error,
+      );
+      rethrow;
+    }
+  }
+
+  /// Enhanced volunteer resolution with in-app notifications
+  static Future<void> volunteerResolveEmergencyV2({
+    required String emergencyId,
+    String? notes,
+  }) async {
+    try {
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) throw Exception('User not authenticated');
+
+      // Create volunteer resolution
+      final volunteerResolution = VolunteerResolution(
+        volunteerId: currentUser.uid,
+        volunteerName: currentUser.displayName ?? 'Unknown Volunteer',
+        resolvedAt: DateTime.now(),
+        notes: notes,
+      );
+
+      // Update volunteer resolution status
+      final updatedVolunteerResolutions = Map<String, VolunteerResolution>.from(
+        emergency.resolvedBy.volunteerResolutions,
+      );
+      updatedVolunteerResolutions[currentUser.uid] = volunteerResolution;
+
+      final updatedResolution = emergency.resolvedBy.copyWith(
+        hasVolunteerCompleted: true,
+        lastVolunteerResolvedAt: DateTime.now(),
+        volunteerResolutions: updatedVolunteerResolutions,
+      );
+
+      final updatedEmergency = emergency.copyWith(
+        resolvedBy: updatedResolution,
+        updatedAt: DateTime.now(),
+      );
+
+      await EmergencyDatabaseService.updateEmergency(emergencyId, updatedEmergency);
+
+      // Check if emergency can be fully resolved
+      if (updatedResolution.canBeFullyResolved) {
+        // Both parties have resolved - mark as fully resolved
+        await _fullyResolveEmergency(emergencyId, emergency.groupId);
+        
+        // Show completion notification
+        InAppNotificationService.instance.showResolutionNotification(
+          title: '🎉 Emergency Completed!',
+          message: 'You have successfully completed the emergency assistance.',
+          emergencyId: emergencyId,
+          isComplete: true,
+        );
+        
+        // Notify attendee of full resolution
+        await _notifyAttendeeOfFullResolution(emergency);
+      } else {
+        // Show partial resolution notification
+        InAppNotificationService.instance.showResolutionNotification(
+          title: '✅ Assistance Completed',
+          message: 'Waiting for attendee confirmation to fully resolve emergency.',
+          emergencyId: emergencyId,
+          isComplete: false,
+        );
+        
+        // Notify attendee that volunteer has marked as resolved
+        await _notifyAttendeeVolunteerResolved(emergency, currentUser);
+      }
+
+      AppLogger.logInfo('Volunteer marked emergency as resolved: $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error marking emergency as resolved by volunteer', e);
+      
+      // Show error notification
+      InAppNotificationService.instance.showNotification(
+        title: '❌ Resolution Failed',
+        message: 'Failed to mark emergency as completed. Please try again.',
+        type: InAppNotificationType.error,
+      );
+      rethrow;
+    }
+  }
+
+  /// Cancel emergency by attendee
+  static Future<void> cancelEmergency({
+    required String emergencyId,
+    required String reason,
+  }) async {
+    try {
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) throw Exception('User not authenticated');
+
+      // Update emergency status to cancelled
+      await EmergencyDatabaseService.updateEmergencyStatus(
+        emergencyId,
+        EmergencyStatus.resolved, // Use resolved status with special notes
+      );
+
+      // Add cancellation note
+      final updatedEmergency = emergency.copyWith(
+        resolvedBy: emergency.resolvedBy.copyWith(
+          attendee: true,
+          attendeeResolvedAt: DateTime.now(),
+          attendeeResolutionNotes: 'CANCELLED: $reason',
+        ),
+        updatedAt: DateTime.now(),
+      );
+
+      await EmergencyDatabaseService.updateEmergency(emergencyId, updatedEmergency);
+
+      // Notify volunteers
+      await _notifyVolunteersCancellation(emergency, reason);
+
+      // Show cancellation notification
+      InAppNotificationService.instance.showNotification(
+        title: '🚫 Emergency Cancelled',
+        message: 'Your emergency has been cancelled. All volunteers have been notified.',
+        type: InAppNotificationType.warning,
+      );
+
+      // Stop location tracking
+      await _stopAttendeeLocationTracking();
+
+      AppLogger.logInfo('Emergency cancelled: $emergencyId - $reason');
+    } catch (e) {
+      AppLogger.logError('Error cancelling emergency', e);
+      
+      // Show error notification
+      InAppNotificationService.instance.showNotification(
+        title: '❌ Cancellation Failed',
+        message: 'Failed to cancel emergency. Please try again.',
+        type: InAppNotificationType.error,
+      );
+      rethrow;
+    }
+  }
+
+  /// Mark emergency as false alarm by volunteer
+  static Future<void> markEmergencyAsFake({
+    required String emergencyId,
+    required String reason,
+  }) async {
+    try {
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) throw Exception('User not authenticated');
+
+      // Update emergency status to fake
+      await EmergencyDatabaseService.updateEmergencyStatus(
+        emergencyId,
+        EmergencyStatus.fake,
+      );
+
+      // Add verification details
+      await EmergencyDatabaseService.verifyEmergency(
+        emergencyId: emergencyId,
+        volunteerId: currentUser.uid,
+        isReal: false,
+        escalationReason: reason,
+      );
+
+      // Show fake alarm notification
+      InAppNotificationService.instance.showNotification(
+        title: '⚠️ False Alarm Reported',
+        message: 'Emergency has been marked as a false alarm.',
+        type: InAppNotificationType.warning,
+      );
+
+      // Notify attendee
+      await _notifyAttendeeFakeAlarm(emergency, currentUser.displayName ?? 'Volunteer', reason);
+
+      AppLogger.logInfo('Emergency marked as fake: $emergencyId - $reason');
+    } catch (e) {
+      AppLogger.logError('Error marking emergency as fake', e);
+      
+      // Show error notification
+      InAppNotificationService.instance.showNotification(
+        title: '❌ Failed to Report',
+        message: 'Failed to mark emergency as false alarm.',
+        type: InAppNotificationType.error,
+      );
+      rethrow;
+    }
+  }
+
+  /// Enhanced volunteer status update with in-app notifications
+  static Future<void> updateVolunteerStatusV2({
+    required String emergencyId,
+    required EmergencyVolunteerStatus status,
+    String? notes,
+    String? estimatedArrivalTime,
+  }) async {
+    try {
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId == null) throw Exception('User not authenticated');
+
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
+
+      // Get current location
+      LatLng? currentLocation;
+      try {
+        final locationData = await _location.getLocation();
+        if (locationData.latitude != null && locationData.longitude != null) {
+          currentLocation = LatLng(locationData.latitude!, locationData.longitude!);
+        }
+      } catch (e) {
+        AppLogger.logWarning('Could not get current location for status update', e);
+      }
+
+      // Get volunteer name for notifications
+      final volunteerName = FirebaseAuth.instance.currentUser?.displayName ?? 'Unknown Volunteer';
+      
+      print('🔄 DEBUG: Updating volunteer status to ${status.name}');
+      
+      // FIXED: Don't call updateVolunteerStatus twice - it's called in notifyAttendeeOfVolunteerStatus
+      // await EmergencyDatabaseService.updateVolunteerStatus(...) // REMOVED
+      
+      // Send notification to attendee about status change (this also updates the status)
+      await notifyAttendeeOfVolunteerStatus(
+        emergencyId: emergencyId,
+        volunteerId: userId,
+        volunteerName: volunteerName,
+        newStatus: status,
+        volunteerLocation: currentLocation,
+      );
+
+      print('✅ DEBUG: Notification sent to attendee');
+
+      // Show in-app notification to volunteer
+      String volunteerMessage;
+      switch (status) {
+        case EmergencyVolunteerStatus.responding:
+          volunteerMessage = 'You are now responding to the emergency';
+          break;
+        case EmergencyVolunteerStatus.enRoute:
+          volunteerMessage = 'En route to emergency location';
+          break;
+        case EmergencyVolunteerStatus.arrived:
+          volunteerMessage = 'You have arrived at the emergency location';
+          break;
+        case EmergencyVolunteerStatus.assisting:
+          volunteerMessage = 'You are now assisting the attendee';
+          break;
+        case EmergencyVolunteerStatus.completed:
+          volunteerMessage = 'Assistance completed';
+          break;
+        default:
+          volunteerMessage = 'Status updated to ${status.displayName}';
+      }
+
+      InAppNotificationService.instance.showVolunteerStatusNotification(
+        volunteerName: 'You',
+        status: volunteerMessage,
+        emergencyId: emergencyId,
+      );
+
+      // Stop location tracking if volunteer completed or cancelled
+      if (status == EmergencyVolunteerStatus.completed || 
+          status == EmergencyVolunteerStatus.unavailable) {
+        await _stopVolunteerLocationTracking();
+      }
+
+      AppLogger.logInfo('Volunteer status updated: ${status.name}');
+    } catch (e) {
+      AppLogger.logError('Error updating volunteer status', e);
+      
+      // Show error notification
+      InAppNotificationService.instance.showNotification(
+        title: '❌ Status Update Failed',
+        message: 'Failed to update your status. Please try again.',
+        type: InAppNotificationType.error,
+      );
+      rethrow;
+    }
+  }
+
+  // ========== Notification Helper Methods ==========
+
+  /// Notify volunteers about emergency cancellation
+  static Future<void> _notifyVolunteersCancellation(Emergency emergency, String reason) async {
+    // Send notifications to all responding volunteers
+    for (final response in emergency.responses.values) {
+      if (response.status != EmergencyVolunteerStatus.unavailable) {
+        // This would be implemented to send individual notifications
+        AppLogger.logInfo('Notifying volunteer ${response.volunteerName} of cancellation');
+      }
+    }
+  }
+
+  /// Notify attendee about false alarm determination
+  static Future<void> _notifyAttendeeFakeAlarm(Emergency emergency, String volunteerName, String reason) async {
+    final notification = AttendeeNotification(
+      timestamp: DateTime.now(),
+      volunteerId: 'system',
+      volunteerName: volunteerName,
+      status: 'false_alarm',
+      message: '⚠️ $volunteerName has determined this was a false alarm: $reason',
+    );
+
+    // Add notification to emergency
+    final updatedNotifications = List<AttendeeNotification>.from(emergency.attendeeNotifications);
+    updatedNotifications.add(notification);
+
+    await EmergencyDatabaseService.updateEmergency(
+      emergency.emergencyId,
+      emergency.copyWith(
+        attendeeNotifications: updatedNotifications,
+        updatedAt: DateTime.now(),
+      ),
+    );
+
+    AppLogger.logInfo('Attendee notified of false alarm: ${emergency.emergencyId}');
+  }
+
+  /// Listen to user's emergency status for attendees
+  static Stream<Emergency?> listenToUserEmergencyStatus(String userId) {
+    return EmergencyDatabaseService.listenToUserEmergencyStatus(userId);
+  }
+
+  /// Listen to specific emergency updates for real-time sync
+  static Stream<Emergency?> listenToEmergencyUpdates(String emergencyId) {
+    return EmergencyDatabaseService.listenToEmergencyUpdates(emergencyId);
   }
 }

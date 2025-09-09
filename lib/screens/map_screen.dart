@@ -29,6 +29,7 @@ import '../models/emergency_response.dart';
 import '../services/emergency_management_service.dart';
 import '../services/emergency_database_service.dart';
 import '../models/emergency.dart';
+import '../widgets/attendee_emergency_status_widget.dart';
 
 class MapScreen extends StatefulWidget {
   final String groupId;
@@ -56,6 +57,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   List<Emergency> _activeEmergencies = [];
   Emergency? _currentEmergencyResponse; // Current emergency volunteer is responding to
   final Set<String> _notifiedEmergencies = <String>{};
+  
+  // NEW: Attendee emergency status tracking
+  StreamSubscription<Emergency?>? _userEmergencySubscription;
+  Emergency? _userActiveEmergency;
   
   // Data streams
   StreamSubscription<QuerySnapshot>? _groupLocationsSubscription;
@@ -346,6 +351,8 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     _listenToGroupLocations();
     _listenToPOIs();
     _startEmergencyListeners();
+    // NEW: Listen to user's emergency status for attendees
+    _listenToUserEmergencyStatus();
     // Initialize emergency management AFTER user role is fetched
     await _initializeEmergencyManagement();
   }
@@ -447,6 +454,52 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     });
   }
 
+  /// Listen to user's emergency status for attendees (enhanced communication system)
+  void _listenToUserEmergencyStatus() {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null || _userRole != 'Attendee') return;
+
+    print('🔄 Setting up attendee emergency listener for user: ${currentUser.uid}');
+    
+    _userEmergencySubscription = EmergencyManagementService.listenToUserEmergencyStatus(currentUser.uid)
+        .listen((emergency) {
+      if (mounted) {
+        print('📥 Emergency update received: ${emergency?.emergencyId ?? 'none'}');
+        if (emergency != null) {
+          print('📊 Emergency data: status=${emergency.status.name}, notifications=${emergency.attendeeNotifications.length}, resolved=${emergency.resolvedBy.attendee}');
+          print('🔧 Volunteer responses: ${emergency.responses.length}'); // ADD THIS LINE
+          
+          // DEBUGGING: Print volunteer statuses
+          for (final response in emergency.responses.values) {
+            print('👤 Volunteer: ${response.volunteerName} - Status: ${response.status.name}');
+          }
+        }
+        
+        // Check if emergency exists and is not fake
+        // Let the widget handle its own resolution logic
+        final hasActiveEmergency = emergency != null && 
+            emergency.status != EmergencyStatus.fake;
+        
+        print('🎯 Emergency status check: hasActive=$hasActiveEmergency, status=${emergency?.status.name}, isFullyResolved=${emergency?.isFullyResolved}');
+        
+        setState(() {
+          _userActiveEmergency = hasActiveEmergency ? emergency : null;
+          // Only consider emergency active if not fully resolved
+          _isEmergency = hasActiveEmergency && !emergency.isFullyResolved;
+          _locationManager.isEmergency = _isEmergency;
+        });
+        
+        // Update location manager emergency status
+        _locationManager.updateEmergencyStatus(emergency != null);
+        
+        AppLogger.logInfo('User emergency status updated: ${emergency?.emergencyId ?? 'none'}');
+      }
+    }, onError: (error) {
+      print('❌ Error in attendee emergency stream: $error');
+      AppLogger.logError('Error in attendee emergency stream', error);
+    });
+  }
+
   void _startEmergencyListeners() {
     // UNIFIED EMERGENCY SYSTEM: Only use Emergency objects via EmergencyManagementService
     // Emergency notifications are handled by _initializeEmergencyManagement via _handleNewEmergencyNotifications
@@ -510,8 +563,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         // Update local state and location manager
         setState(() {
           _isEmergency = true;
+          _userActiveEmergency = emergency; // FIXED: Immediately show attendee widget
           _locationManager.isEmergency = true;
         });
+        
+        print('🎯 DEBUG: Emergency created and _userActiveEmergency set immediately: ${emergency.emergencyId}');
         
         // Update location manager for enhanced tracking
         _locationManager.updateEmergencyStatus(true);
@@ -1076,6 +1132,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       _groupLocationsSubscription?.cancel();
       _poisSubscription?.cancel();
       _emergenciesSubscription?.cancel();
+      _userEmergencySubscription?.cancel(); // NEW: Cancel attendee emergency stream
       
       // Cancel additional emergency subscriptions for volunteers
       for (final subscription in _additionalEmergencySubscriptions) {
@@ -1338,6 +1395,28 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           // Emergency Response Card for Volunteers - Connected to Database
           // Positioned with better spacing and responsiveness
           // Emergency Response Card for volunteers - positioned at bottom
+          // NEW: Attendee Emergency Status Widget for enhanced communication
+          if (_userRole == 'Attendee' && _userActiveEmergency != null) ...[
+            // DEBUG: Log when attendee widget shows
+            Builder(
+              builder: (context) {
+                print('🔍 DEBUG BUILD: Attendee emergency widget showing - Role: $_userRole, Emergency: ${_userActiveEmergency?.emergencyId}');
+                return Container();
+              },
+            ),
+            Positioned(
+              top: 80, // Below app bar
+              left: 16,
+              right: 16,
+              child: AttendeeEmergencyStatusWidget(
+                emergency: _userActiveEmergency!,
+                onResolve: _attendeeMarkResolved,
+                onCancel: _cancelEmergency,
+              ),
+            ),
+          ],
+
+          // Volunteer Emergency Response Card (existing)
           if (_userRole == 'Volunteer' && _currentEmergencyResponse != null) ...[
             // DEBUG: Log when card should show
             Builder(
@@ -1400,6 +1479,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       _focusOnLocation(_currentEmergencyResponse!.location);
                     }
                   },
+                  onReportFakeAlarm: () => _reportFakeAlarm(_currentEmergencyResponse!),
                 ),
               ),
             ),
@@ -1534,9 +1614,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           break;
           
         case EmergencyResponseStatus.completed:
-          // Resolve emergency
-          await EmergencyManagementService.volunteerResolveEmergency(
+          // Use new dual resolution system
+          await EmergencyManagementService.volunteerMarkResolved(
             emergencyId: emergency.emergencyId,
+            notes: 'Assistance completed by volunteer',
           );
           
           // Clear current emergency response
@@ -1545,9 +1626,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           });
           
           _showTopSnackBar(
-            message: '✅ Emergency marked as resolved',
+            message: '✅ Emergency assistance completed. Awaiting attendee confirmation.',
             backgroundColor: Colors.green,
-            duration: const Duration(seconds: 3),
+            duration: const Duration(seconds: 4),
             icon: const Icon(Icons.check_circle, color: Colors.white),
           );
           print('✅ Emergency resolved by volunteer');
@@ -1573,6 +1654,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       // Refresh the emergency data to reflect the updated status
       await _refreshCurrentEmergencyData(emergency.emergencyId);
       
+      // NEW: Notify attendee of volunteer status change
+      await _notifyAttendeeOfStatusChange(emergency, newStatus, userId);
+      
       // Show confirmation message
       if (mounted) {
         _showTopSnackBar(
@@ -1593,6 +1677,181 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           icon: const Icon(Icons.error, color: Colors.white),
         );
       }
+    }
+  }
+
+  /// Report emergency as false alarm by volunteer
+  Future<void> _reportFakeAlarm(Emergency emergency) async {
+    try {
+      // Show confirmation dialog with reason input
+      final result = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (context) => _buildFakeAlarmDialog(),
+      );
+
+      if (result == null || result['confirmed'] != true) return;
+
+      print('⚠️ Volunteer reporting emergency as fake: ${emergency.emergencyId}');
+
+      // Use enhanced fake alarm reporting system
+      await EmergencyManagementService.markEmergencyAsFake(
+        emergencyId: emergency.emergencyId,
+        reason: result['reason'] ?? 'False alarm reported by volunteer',
+      );
+
+      // Clear current emergency response
+      setState(() {
+        _currentEmergencyResponse = null;
+      });
+
+      print('✅ Emergency successfully marked as fake alarm');
+    } catch (e) {
+      if (mounted) {
+        _showTopSnackBar(
+          message: '❌ Failed to report false alarm: $e',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+      }
+    }
+  }
+
+  /// Build fake alarm reporting dialog
+  Widget _buildFakeAlarmDialog() {
+    final reasonController = TextEditingController();
+    String selectedReason = 'No emergency found';
+    
+    return StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: const Text('Report False Alarm'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Are you sure this is a false alarm? This will notify the attendee and close the emergency.',
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Reason for false alarm:',
+                style: TextStyle(fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                value: selectedReason,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  'No emergency found',
+                  'Location is empty',
+                  'Attendee not present',
+                  'Situation already resolved',
+                  'Duplicate emergency',
+                  'Accidental activation',
+                  'Other',
+                ].map((reason) => DropdownMenuItem(
+                  value: reason,
+                  child: Text(reason),
+                )).toList(),
+                onChanged: (value) {
+                  setState(() {
+                    selectedReason = value!;
+                  });
+                },
+              ),
+              if (selectedReason == 'Other') ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reasonController,
+                  decoration: const InputDecoration(
+                    hintText: 'Please specify...',
+                    border: OutlineInputBorder(),
+                  ),
+                  maxLines: 2,
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop({'confirmed': false}),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop({
+              'confirmed': true,
+              'reason': selectedReason == 'Other' 
+                  ? reasonController.text.trim()
+                  : selectedReason,
+            }),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
+            child: const Text('Report False Alarm'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Notify attendee of volunteer status changes
+  Future<void> _notifyAttendeeOfStatusChange(
+    Emergency emergency, 
+    EmergencyResponseStatus newStatus, 
+    String volunteerId
+  ) async {
+    try {
+      // Get current location for distance calculation
+      LatLng? currentLocation;
+      final locationData = _locationManager.currentLocation;
+      if (locationData?.latitude != null && locationData?.longitude != null) {
+        currentLocation = LatLng(locationData!.latitude!, locationData.longitude!);
+      }
+
+      // Map EmergencyResponseStatus to EmergencyVolunteerStatus
+      EmergencyVolunteerStatus volunteerStatus;
+      switch (newStatus) {
+        case EmergencyResponseStatus.responding:
+          volunteerStatus = EmergencyVolunteerStatus.responding;
+          break;
+        case EmergencyResponseStatus.enRoute:
+          volunteerStatus = EmergencyVolunteerStatus.enRoute;
+          break;
+        case EmergencyResponseStatus.arrived:
+          volunteerStatus = EmergencyVolunteerStatus.arrived;
+          break;
+        case EmergencyResponseStatus.verified:
+          volunteerStatus = EmergencyVolunteerStatus.verified;
+          break;
+        case EmergencyResponseStatus.assisting:
+          volunteerStatus = EmergencyVolunteerStatus.assisting;
+          break;
+        case EmergencyResponseStatus.completed:
+          volunteerStatus = EmergencyVolunteerStatus.completed;
+          break;
+        default:
+          return; // Don't notify for other statuses
+      }
+
+      // Get volunteer name
+      final currentUser = FirebaseAuth.instance.currentUser;
+      final volunteerName = currentUser?.displayName ?? 'Unknown Volunteer';
+
+      // Send notification to attendee
+      await EmergencyManagementService.notifyAttendeeOfVolunteerStatus(
+        emergencyId: emergency.emergencyId,
+        volunteerId: volunteerId,
+        volunteerName: volunteerName,
+        newStatus: volunteerStatus,
+        volunteerLocation: currentLocation,
+      );
+
+      AppLogger.logInfo('Attendee notified of status change: ${newStatus.name}');
+    } catch (e) {
+      AppLogger.logError('Error notifying attendee of status change', e);
+      // Don't rethrow - this is a background operation
     }
   }
 
@@ -1735,6 +1994,200 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       // Log error but don't show to user as this is background cleanup
       AppLogger.logError('Error checking emergency resolution status', e);
     }
+  }
+
+  /// Enhanced attendee mark resolved with dual resolution system
+  Future<void> _attendeeMarkResolved() async {
+    if (_userActiveEmergency == null) return;
+
+    try {
+      // Show confirmation dialog with enhanced options
+      final result = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (context) => _buildResolveDialog(),
+      );
+
+      if (result == null || result['confirmed'] != true) return;
+
+      print('🔧 Attendee marking emergency as resolved: ${_userActiveEmergency!.emergencyId}');
+
+      // Use enhanced resolution system with notes
+      await EmergencyManagementService.attendeeResolveEmergencyV2(
+        emergencyId: _userActiveEmergency!.emergencyId,
+        notes: result['notes'] ?? 'Emergency resolved by attendee',
+      );
+
+      print('✅ Emergency successfully marked as resolved by attendee');
+    } catch (e) {
+      if (mounted) {
+        _showTopSnackBar(
+          message: '❌ Failed to mark emergency as resolved: $e',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+      }
+    }
+  }
+
+  /// Enhanced cancel emergency for attendee
+  Future<void> _cancelEmergency() async {
+    if (_userActiveEmergency == null) return;
+
+    try {
+      // Show cancellation dialog with reason input
+      final result = await showDialog<Map<String, dynamic>>(
+        context: context,
+        builder: (context) => _buildCancelDialog(),
+      );
+
+      if (result == null || result['confirmed'] != true) return;
+
+      print('� Attendee cancelling emergency: ${_userActiveEmergency!.emergencyId}');
+
+      // Use enhanced cancellation system
+      await EmergencyManagementService.cancelEmergency(
+        emergencyId: _userActiveEmergency!.emergencyId,
+        reason: result['reason'] ?? 'Cancelled by attendee',
+      );
+
+      print('✅ Emergency successfully cancelled by attendee');
+    } catch (e) {
+      if (mounted) {
+        _showTopSnackBar(
+          message: '❌ Failed to cancel emergency: $e',
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.error, color: Colors.white),
+        );
+      }
+    }
+  }
+
+  /// Build enhanced resolve dialog with notes option
+  Widget _buildResolveDialog() {
+    final notesController = TextEditingController();
+    
+    return AlertDialog(
+      title: const Text('Mark Emergency as Resolved'),
+      content: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Are you sure your emergency has been resolved? This will notify volunteers and require their confirmation for full resolution.',
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Resolution notes (optional):',
+              style: TextStyle(fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: notesController,
+              decoration: const InputDecoration(
+                hintText: 'How was your emergency resolved?',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 3,
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop({'confirmed': false}),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: () => Navigator.of(context).pop({
+            'confirmed': true,
+            'notes': notesController.text.trim(),
+          }),
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+          child: const Text('Mark Resolved'),
+        ),
+      ],
+    );
+  }
+
+  /// Build enhanced cancel dialog with reason input
+  Widget _buildCancelDialog() {
+    final reasonController = TextEditingController();
+    String selectedReason = 'No longer needed';
+    
+    return StatefulBuilder(
+      builder: (context, setState) => AlertDialog(
+        title: const Text('Cancel Emergency'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Are you sure you want to cancel your emergency? This action will notify all volunteers.',
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Reason for cancellation:',
+                style: TextStyle(fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                value: selectedReason,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  'No longer needed',
+                  'False alarm',
+                  'Situation resolved',
+                  'Found alternative help',
+                  'Emergency passed',
+                  'Other',
+                ].map((reason) => DropdownMenuItem(
+                  value: reason,
+                  child: Text(reason),
+                )).toList(),
+                onChanged: (value) {
+                  setState(() {
+                    selectedReason = value!;
+                  });
+                },
+              ),
+              if (selectedReason == 'Other') ...[
+                const SizedBox(height: 12),
+                TextField(
+                  controller: reasonController,
+                  decoration: const InputDecoration(
+                    hintText: 'Please specify...',
+                    border: OutlineInputBorder(),
+                  ),
+                  maxLines: 2,
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop({'confirmed': false}),
+            child: const Text('Keep Emergency'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(context).pop({
+              'confirmed': true,
+              'reason': selectedReason == 'Other' 
+                  ? reasonController.text.trim()
+                  : selectedReason,
+            }),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Cancel Emergency'),
+          ),
+        ],
+      ),
+    );
   }
 
   /// Initiate volunteer response to an emergency

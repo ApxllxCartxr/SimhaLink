@@ -1095,4 +1095,78 @@ class EmergencyDatabaseService {
       return null;
     }
   }
+
+  // =====================================================================
+  // ENHANCED METHODS FOR DUAL RESOLUTION AND NOTIFICATIONS
+  // =====================================================================
+
+  /// Update emergency document in database
+  static Future<void> updateEmergency(String emergencyId, Emergency emergency) async {
+    try {
+      await _firestore
+          .collection(_collection)
+          .doc(emergencyId)
+          .set(emergency.toFirestore(), SetOptions(merge: true));
+      
+      AppLogger.logInfo('Emergency updated: $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error updating emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Update emergency status with optional timestamp
+  static Future<void> updateEmergencyStatus(
+    String emergencyId,
+    EmergencyStatus status, {
+    DateTime? fullyResolvedAt,
+  }) async {
+    try {
+      final updateData = <String, dynamic>{
+        'status': status.name,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      if (fullyResolvedAt != null) {
+        updateData['fullyResolvedAt'] = Timestamp.fromDate(fullyResolvedAt);
+      }
+
+      await _firestore
+          .collection(_collection)
+          .doc(emergencyId)
+          .update(updateData);
+      
+      AppLogger.logInfo('Emergency status updated: $emergencyId -> ${status.name}');
+    } catch (e) {
+      AppLogger.logError('Error updating emergency status', e);
+      rethrow;
+    }
+  }
+
+  /// Listen to user's emergency status for real-time updates
+  static Stream<Emergency?> listenToUserEmergencyStatus(String userId) {
+    return _firestore
+        .collection(_collection)
+        .where('attendeeId', isEqualTo: userId)
+        .where('status', whereNotIn: ['resolved', 'fake'])
+        .orderBy('createdAt', descending: true)
+        .limit(1)
+        .snapshots()
+        .map((snapshot) {
+      if (snapshot.docs.isEmpty) return null;
+      return Emergency.fromFirestore(snapshot.docs.first);
+    });
+  }
+
+  /// Listen to specific emergency updates for real-time sync
+  static Stream<Emergency?> listenToEmergencyUpdates(String emergencyId) {
+    return _firestore
+        .collection(_collection)
+        .doc(emergencyId)
+        .snapshots()
+        .map((snapshot) {
+      if (!snapshot.exists) return null;
+      return Emergency.fromFirestore(snapshot);
+    });
+  }
 }
