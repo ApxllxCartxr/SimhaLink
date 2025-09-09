@@ -388,13 +388,31 @@ class _SoloMapScreenState extends State<SoloMapScreen> with TickerProviderStateM
   }
 
   Future<void> _setupInitialData() async {
+    // Phase 1: Critical initial setup
     await _getUserRole();
     await _setupLocationTracking();
-    _listenToGroupLocations();
-    _listenToPOIs();
-    _startEmergencyListeners();
-    // Initialize emergency management AFTER user role is fetched
+    
+    // Phase 2: Emergency management (high priority)
     await _initializeEmergencyManagement();
+    
+    // Phase 3: Defer non-critical components with a small delay
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        _listenToGroupLocations();
+      }
+    });
+    
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (mounted) {
+        _listenToPOIs();
+      }
+    });
+    
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        _startEmergencyListeners();
+      }
+    });
     
     // DEBUG: Log current emergency state
     AppLogger.logInfo('SOLO MAP DEBUG - Emergency state: $_isEmergency, Active emergencies: ${_activeEmergencies.length}');
