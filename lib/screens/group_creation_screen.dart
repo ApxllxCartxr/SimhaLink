@@ -183,19 +183,32 @@ class _GroupCreationScreenState extends State<GroupCreationScreen> {
     });
 
     try {
-      // Create a default group for solo mode
-      final groupId = await UserPreferences.createDefaultGroupIfNeeded();
-      if (groupId != null) {
-        await UserPreferences.setUserGroupId(groupId);
-        
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(
-              builder: (context) => MainNavigationScreen(groupId: groupId),
-            ),
-          );
-        }
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) return;
+
+      // For solo mode, don't create any group - just clear any existing group data
+      await UserPreferences.clearGroupData();
+      
+      // Set a preference flag to indicate the user is in solo mode
+      await UserPreferences.setUserInSoloMode(true);
+      
+      // Update user document to mark solo mode
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({
+        'inSoloMode': true,
+        'groupId': FieldValue.delete(), // Ensure no group reference
+        'lastSoloModeSet': FieldValue.serverTimestamp(),
+      });
+
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => MainNavigationScreen(groupId: null), // Pass null for solo mode
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {

@@ -25,6 +25,9 @@ class Emergency {
   final bool isVerified;             // Whether emergency has been verified
   final bool isSeriousEscalation;    // Whether marked for escalation
   final String? escalationReason;    // Reason for escalation
+  
+  // NEW: Attendee notification system
+  final List<AttendeeNotification> attendeeNotifications;
 
   const Emergency({
     required this.emergencyId,
@@ -47,6 +50,8 @@ class Emergency {
     this.isVerified = false,
     this.isSeriousEscalation = false,
     this.escalationReason,
+    // NEW: Attendee notifications
+    this.attendeeNotifications = const [],
   });
 
   /// Convert to Firestore document
@@ -72,6 +77,8 @@ class Emergency {
       'isVerified': isVerified,
       'isSeriousEscalation': isSeriousEscalation,
       'escalationReason': escalationReason,
+      // NEW: Attendee notifications
+      'attendeeNotifications': attendeeNotifications.map((notification) => notification.toMap()).toList(),
     };
   }
 
@@ -80,6 +87,12 @@ class Emergency {
     try {
       final data = doc.data() as Map<String, dynamic>;
       final locationGeo = data['location'] as GeoPoint;
+      
+      // Parse attendee notifications
+      final attendeeNotificationsList = data['attendeeNotifications'] as List<dynamic>? ?? [];
+      final attendeeNotifications = attendeeNotificationsList
+          .map((notification) => AttendeeNotification.fromMap(notification as Map<String, dynamic>))
+          .toList();
       
       return Emergency(
         emergencyId: data['emergencyId'] ?? doc.id,
@@ -111,6 +124,8 @@ class Emergency {
         isVerified: data['isVerified'] as bool? ?? false,
         isSeriousEscalation: data['isSeriousEscalation'] as bool? ?? false,
         escalationReason: data['escalationReason'] as String?,
+        // NEW: Attendee notifications
+        attendeeNotifications: attendeeNotifications,
       );
     } catch (e) {
       // Log the error for debugging
@@ -141,6 +156,8 @@ class Emergency {
     bool? isVerified,
     bool? isSeriousEscalation,
     String? escalationReason,
+    // NEW: Attendee notifications
+    List<AttendeeNotification>? attendeeNotifications,
   }) {
     return Emergency(
       emergencyId: emergencyId ?? this.emergencyId,
@@ -163,6 +180,8 @@ class Emergency {
       isVerified: isVerified ?? this.isVerified,
       isSeriousEscalation: isSeriousEscalation ?? this.isSeriousEscalation,
       escalationReason: escalationReason ?? this.escalationReason,
+      // NEW: Attendee notifications
+      attendeeNotifications: attendeeNotifications ?? this.attendeeNotifications,
     );
   }
 
@@ -351,33 +370,167 @@ extension EmergencyVolunteerStatusExtension on EmergencyVolunteerStatus {
 class EmergencyResolution {
   final bool attendee;
   final bool hasVolunteerCompleted;
+  final Map<String, VolunteerResolution> volunteerResolutions;
+  final DateTime? attendeeResolvedAt;
+  final DateTime? lastVolunteerResolvedAt;
+  final String? attendeeResolutionNotes;
 
   const EmergencyResolution({
     required this.attendee,
     required this.hasVolunteerCompleted,
+    this.volunteerResolutions = const {},
+    this.attendeeResolvedAt,
+    this.lastVolunteerResolvedAt,
+    this.attendeeResolutionNotes,
   });
+
+  /// Check if emergency can be fully resolved
+  bool get canBeFullyResolved => attendee && hasVolunteerCompleted;
+  
+  /// Get resolution status description
+  String get statusDescription {
+    if (canBeFullyResolved) return 'Fully resolved by both parties';
+    if (attendee && !hasVolunteerCompleted) return 'Resolved by attendee, waiting for volunteer confirmation';
+    if (!attendee && hasVolunteerCompleted) return 'Resolved by volunteer, waiting for attendee confirmation';
+    return 'Emergency still active';
+  }
 
   Map<String, dynamic> toMap() {
     return {
       'attendee': attendee,
       'hasVolunteerCompleted': hasVolunteerCompleted,
+      'volunteerResolutions': volunteerResolutions.map((key, value) => MapEntry(key, value.toMap())),
+      'attendeeResolvedAt': attendeeResolvedAt?.millisecondsSinceEpoch,
+      'lastVolunteerResolvedAt': lastVolunteerResolvedAt?.millisecondsSinceEpoch,
+      'attendeeResolutionNotes': attendeeResolutionNotes,
     };
   }
 
   factory EmergencyResolution.fromMap(Map<String, dynamic> map) {
+    final volunteerResolutionsMap = map['volunteerResolutions'] as Map<String, dynamic>? ?? {};
+    final volunteerResolutions = <String, VolunteerResolution>{};
+    
+    for (final entry in volunteerResolutionsMap.entries) {
+      if (entry.value is Map<String, dynamic>) {
+        volunteerResolutions[entry.key] = VolunteerResolution.fromMap(entry.value);
+      }
+    }
+
     return EmergencyResolution(
       attendee: map['attendee'] ?? false,
       hasVolunteerCompleted: map['hasVolunteerCompleted'] ?? false,
+      volunteerResolutions: volunteerResolutions,
+      attendeeResolvedAt: map['attendeeResolvedAt'] != null 
+          ? DateTime.fromMillisecondsSinceEpoch(map['attendeeResolvedAt'])
+          : null,
+      lastVolunteerResolvedAt: map['lastVolunteerResolvedAt'] != null 
+          ? DateTime.fromMillisecondsSinceEpoch(map['lastVolunteerResolvedAt'])
+          : null,
+      attendeeResolutionNotes: map['attendeeResolutionNotes'],
     );
   }
 
   EmergencyResolution copyWith({
     bool? attendee,
     bool? hasVolunteerCompleted,
+    Map<String, VolunteerResolution>? volunteerResolutions,
+    DateTime? attendeeResolvedAt,
+    DateTime? lastVolunteerResolvedAt,
+    String? attendeeResolutionNotes,
   }) {
     return EmergencyResolution(
       attendee: attendee ?? this.attendee,
       hasVolunteerCompleted: hasVolunteerCompleted ?? this.hasVolunteerCompleted,
+      volunteerResolutions: volunteerResolutions ?? this.volunteerResolutions,
+      attendeeResolvedAt: attendeeResolvedAt ?? this.attendeeResolvedAt,
+      lastVolunteerResolvedAt: lastVolunteerResolvedAt ?? this.lastVolunteerResolvedAt,
+      attendeeResolutionNotes: attendeeResolutionNotes ?? this.attendeeResolutionNotes,
+    );
+  }
+}
+
+/// Volunteer resolution details
+class VolunteerResolution {
+  final String volunteerId;
+  final String volunteerName;
+  final DateTime resolvedAt;
+  final String? notes;
+
+  const VolunteerResolution({
+    required this.volunteerId,
+    required this.volunteerName,
+    required this.resolvedAt,
+    this.notes,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'volunteerId': volunteerId,
+      'volunteerName': volunteerName,
+      'resolvedAt': resolvedAt.millisecondsSinceEpoch,
+      'notes': notes,
+    };
+  }
+
+  factory VolunteerResolution.fromMap(Map<String, dynamic> map) {
+    return VolunteerResolution(
+      volunteerId: map['volunteerId'] ?? '',
+      volunteerName: map['volunteerName'] ?? '',
+      resolvedAt: DateTime.fromMillisecondsSinceEpoch(map['resolvedAt'] ?? 0),
+      notes: map['notes'],
+    );
+  }
+}
+
+/// Attendee notification for volunteer status updates
+class AttendeeNotification {
+  final DateTime timestamp;
+  final String volunteerId;
+  final String volunteerName;
+  final String status;
+  final String message;
+  final LatLng? volunteerLocation;
+
+  const AttendeeNotification({
+    required this.timestamp,
+    required this.volunteerId,
+    required this.volunteerName,
+    required this.status,
+    required this.message,
+    this.volunteerLocation,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'timestamp': timestamp.millisecondsSinceEpoch,
+      'volunteerId': volunteerId,
+      'volunteerName': volunteerName,
+      'status': status,
+      'message': message,
+      'volunteerLocation': volunteerLocation != null ? {
+        'latitude': volunteerLocation!.latitude,
+        'longitude': volunteerLocation!.longitude,
+      } : null,
+    };
+  }
+
+  factory AttendeeNotification.fromMap(Map<String, dynamic> map) {
+    LatLng? volunteerLocation;
+    if (map['volunteerLocation'] != null) {
+      final locMap = map['volunteerLocation'] as Map<String, dynamic>;
+      volunteerLocation = LatLng(
+        locMap['latitude'] ?? 0.0,
+        locMap['longitude'] ?? 0.0,
+      );
+    }
+
+    return AttendeeNotification(
+      timestamp: DateTime.fromMillisecondsSinceEpoch(map['timestamp'] ?? 0),
+      volunteerId: map['volunteerId'] ?? '',
+      volunteerName: map['volunteerName'] ?? '',
+      status: map['status'] ?? '',
+      message: map['message'] ?? '',
+      volunteerLocation: volunteerLocation,
     );
   }
 }

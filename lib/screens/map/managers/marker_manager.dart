@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -116,6 +117,9 @@ class MarkerManager {
     List<Marker> markers = [];
     final currentUserId = FirebaseAuth.instance.currentUser?.uid;
     
+    // Optimization: Limit markers based on zoom level to improve performance
+    final maxMarkers = _getMaxMarkersForZoom();
+    
     // Get list of user IDs who have active emergencies to avoid duplicate markers
     final activeEmergencyUserIds = activeEmergencies
         .where((emergency) => emergency.status != EmergencyStatus.resolved)
@@ -128,47 +132,61 @@ class MarkerManager {
       return !activeEmergencyUserIds.contains(member.userId);
     }).toList();
     
-    // Role-based marker visibility (using filtered members)
+    // Sort by distance if current location is available for better prioritization
+    if (currentLocation != null) {
+      _sortByDistance(filteredGroupMembers, currentLocation);
+      _sortByDistance(nearbyVolunteers, currentLocation);
+      _sortByDistance(allVolunteers, currentLocation);
+    }
+    
+    // Role-based marker visibility (using filtered and limited members)
     if (userRole == 'Attendee') {
-      markers.addAll(filteredGroupMembers
+      final attendeeMarkers = filteredGroupMembers
           .where((member) => 
               member.userId != currentUserId && 
               (member.userRole == 'Attendee' || member.userRole == null))
+          .take(maxMarkers) // Limit markers
           .map((member) => _buildUserMarker(
               member, 
               AppColors.mapAttendee, 
               Icons.person_pin,
               onUserMarkerTap,
               onUserMarkerLongPress,
-          )));
+          ));
+      markers.addAll(attendeeMarkers);
     } else if (userRole == 'Volunteer') {
       // Volunteers see nearby volunteers/organizers (filtered to exclude those with emergencies)
-      markers.addAll(nearbyVolunteers
+      final volunteerMarkers = nearbyVolunteers
           .where((volunteer) => !activeEmergencyUserIds.contains(volunteer.userId))
+          .take(maxMarkers) // Limit markers
           .map((volunteer) => _buildUserMarker(
               volunteer, 
               volunteer.userRole == 'Volunteer' ? AppColors.mapVolunteer : AppColors.mapOrganizer, 
               volunteer.userRole == 'Volunteer' ? Icons.local_hospital : Icons.admin_panel_settings,
               onUserMarkerTap,
               onUserMarkerLongPress,
-          )));
+          ));
+      markers.addAll(volunteerMarkers);
     } else if (userRole == 'Organizer') {
       // Organizers see all volunteers (filtered to exclude those with emergencies)
-      markers.addAll(allVolunteers
+      final organizerMarkers = allVolunteers
           .where((volunteer) => !activeEmergencyUserIds.contains(volunteer.userId))
+          .take(maxMarkers) // Limit markers
           .map((volunteer) => _buildUserMarker(
               volunteer, 
               AppColors.mapVolunteer, 
               Icons.local_hospital,
               onUserMarkerTap,
               onUserMarkerLongPress,
-          )));
+          ));
+      markers.addAll(organizerMarkers);
       
       // Organizers also see other organizers in their group (filtered)
       markers.addAll(filteredGroupMembers
           .where((member) => 
               member.userId != currentUserId && 
               member.userRole == 'Organizer')
+          .take(maxMarkers ~/ 2) // Limit organizer markers too
           .map((organizer) => _buildUserMarker(
               organizer, 
               AppColors.mapOrganizer, 
@@ -184,6 +202,54 @@ class MarkerManager {
     }
 
     return markers;
+  }
+  
+  /// Optimization: Get maximum markers based on zoom level
+  int _getMaxMarkersForZoom() {
+    try {
+      final zoom = mapController?.camera.zoom ?? currentZoom;
+      if (zoom >= 16) return 100; // High zoom - show more markers
+      if (zoom >= 14) return 50;  // Medium zoom
+      if (zoom >= 12) return 25;  // Low zoom
+      return 10; // Very low zoom - show only closest markers
+    } catch (e) {
+      return 50; // Fallback
+    }
+  }
+  
+  /// Optimization: Sort locations by distance for better prioritization
+  void _sortByDistance(List<UserLocation> locations, LocationData currentLocation) {
+    try {
+      locations.sort((a, b) {
+        final distanceA = _calculateDistance(
+          currentLocation.latitude!, 
+          currentLocation.longitude!, 
+          a.latitude, 
+          a.longitude
+        );
+        final distanceB = _calculateDistance(
+          currentLocation.latitude!, 
+          currentLocation.longitude!, 
+          b.latitude, 
+          b.longitude
+        );
+        return distanceA.compareTo(distanceB);
+      });
+    } catch (e) {
+      // If sorting fails, keep original order
+    }
+  }
+  
+  /// Helper to calculate distance between two points
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    const double earthRadius = 6371000; // meters
+    final dLat = (lat2 - lat1) * (math.pi / 180);
+    final dLon = (lon2 - lon1) * (math.pi / 180);
+    final a = math.sin(dLat / 2) * math.sin(dLat / 2) + 
+              math.cos(lat1 * math.pi / 180) * math.cos(lat2 * math.pi / 180) * 
+              math.sin(dLon / 2) * math.sin(dLon / 2);
+    final c = 2 * math.asin(math.sqrt(a));
+    return earthRadius * c;
   }
   
   /// Builds POI markers based on user role

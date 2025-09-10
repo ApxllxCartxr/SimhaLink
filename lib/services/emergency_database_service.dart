@@ -883,4 +883,290 @@ class EmergencyDatabaseService {
 
     return earthRadius * c; // Distance in meters
   }
+
+  // ========== SOLO MODE EMERGENCY METHODS ==========
+
+  /// Create emergency for solo users (not in groups)
+  static Future<Emergency> createSoloEmergency({
+    required String attendeeId,
+    required String attendeeName,
+    required LatLng location,
+    String? message,
+  }) async {
+    try {
+      // ENFORCE ONE EMERGENCY PER USER: Check if user already has an active emergency (both group and solo)
+      final existingGroupEmergency = await getUserActiveEmergency(attendeeId);
+      if (existingGroupEmergency != null) {
+        AppLogger.logWarning('User $attendeeId already has active emergency: ${existingGroupEmergency.emergencyId}');
+        return existingGroupEmergency;
+      }
+
+      final existingSoloEmergency = await getUserActiveSoloEmergency(attendeeId);
+      if (existingSoloEmergency != null) {
+        AppLogger.logWarning('User $attendeeId already has active solo emergency: ${existingSoloEmergency.emergencyId}');
+        return existingSoloEmergency;
+      }
+
+      final emergencyId = 'solo_${DateTime.now().millisecondsSinceEpoch}_${attendeeId.substring(0, 8)}';
+      final now = DateTime.now();
+
+      // Create emergency document for solo user
+      final emergency = Emergency(
+        emergencyId: emergencyId,
+        attendeeId: attendeeId,
+        attendeeName: attendeeName,
+        groupId: 'solo_mode', // Special identifier for solo emergencies
+        location: location,
+        status: EmergencyStatus.unverified,
+        message: message,
+        createdAt: now,
+        updatedAt: now,
+        responses: {},
+        resolvedBy: const EmergencyResolution(attendee: false, hasVolunteerCompleted: false),
+      );
+
+      // Use batch write for atomic operation
+      final batch = _firestore.batch();
+
+      // Create emergency document in solo collection
+      batch.set(
+        _firestore.collection('solo_emergencies').doc(emergencyId),
+        emergency.toFirestore(),
+      );
+
+      // Update user location with emergency state in solo collection
+      batch.set(
+        _firestore.collection('solo_user_locations').doc(attendeeId),
+        {
+          'userId': attendeeId,
+          'userName': attendeeName,
+          'latitude': location.latitude,
+          'longitude': location.longitude,
+          'isEmergency': true,
+          'emergencyId': emergencyId,
+          'lastUpdated': FieldValue.serverTimestamp(),
+          'userRole': 'Attendee',
+          'groupId': 'solo_mode',
+        },
+        SetOptions(merge: true),
+      );
+
+      await batch.commit();
+
+      AppLogger.logInfo('Solo emergency created with duplicate prevention: $emergencyId');
+      return emergency;
+    } catch (e) {
+      AppLogger.logError('Error creating solo emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Resolve solo emergency for a user
+  static Future<void> resolveSoloEmergency(String attendeeId) async {
+    try {
+      // Find active solo emergency for this user
+      final querySnapshot = await _firestore
+          .collection('solo_emergencies')
+          .where('attendeeId', isEqualTo: attendeeId)
+          .where('status', whereIn: [
+            EmergencyStatus.unverified.name,
+            EmergencyStatus.accepted.name,
+            EmergencyStatus.inProgress.name,
+            EmergencyStatus.verified.name,
+            EmergencyStatus.escalated.name,
+          ])
+          .get();
+
+      if (querySnapshot.docs.isNotEmpty) {
+        final batch = _firestore.batch();
+        
+        for (final doc in querySnapshot.docs) {
+          // Update emergency status to resolved
+          batch.update(doc.reference, {
+            'status': EmergencyStatus.resolved.name,
+            'updatedAt': FieldValue.serverTimestamp(),
+            'resolvedBy.attendee': true,
+            'resolvedAt': FieldValue.serverTimestamp(),
+          });
+        }
+
+        // Update user location to remove emergency state
+        batch.update(
+          _firestore.collection('solo_user_locations').doc(attendeeId),
+          {
+            'isEmergency': false,
+            'emergencyId': FieldValue.delete(),
+            'lastUpdated': FieldValue.serverTimestamp(),
+          },
+        );
+
+        await batch.commit();
+        
+        AppLogger.logInfo('Solo emergency resolved for user: $attendeeId');
+      }
+    } catch (e) {
+      AppLogger.logError('Error resolving solo emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Get user's active solo emergency
+  static Future<Emergency?> getUserActiveSoloEmergency(String userId) async {
+    try {
+      final querySnapshot = await _firestore
+          .collection('solo_emergencies')
+          .where('attendeeId', isEqualTo: userId)
+          .where('status', whereIn: [
+            EmergencyStatus.unverified.name,
+            EmergencyStatus.accepted.name,
+            EmergencyStatus.inProgress.name,
+            EmergencyStatus.verified.name,
+            EmergencyStatus.escalated.name,
+          ])
+          .limit(1)
+          .get();
+
+      if (querySnapshot.docs.isNotEmpty) {
+        return Emergency.fromFirestore(querySnapshot.docs.first);
+      }
+      return null;
+    } catch (e) {
+      AppLogger.logError('Error getting user active solo emergency', e);
+      return null;
+    }
+  }
+
+  /// Get all active solo emergencies (for volunteers)
+  static Future<List<Emergency>> getAllActiveSoloEmergencies() async {
+    try {
+      final querySnapshot = await _firestore
+          .collection('solo_emergencies')
+          .where('status', whereIn: [
+            EmergencyStatus.unverified.name,
+            EmergencyStatus.accepted.name,
+            EmergencyStatus.inProgress.name,
+            EmergencyStatus.verified.name,
+            EmergencyStatus.escalated.name,
+          ])
+          .orderBy('createdAt', descending: true)
+          .get();
+
+      return querySnapshot.docs
+          .map((doc) => Emergency.fromFirestore(doc))
+          .toList();
+    } catch (e) {
+      AppLogger.logError('Error getting all active solo emergencies', e);
+      return [];
+    }
+  }
+
+  /// Stream of solo emergencies for real-time listening
+  static Stream<List<Emergency>> getSoloEmergencies() {
+    return _firestore
+        .collection('solo_emergencies')
+        .where('status', whereIn: [
+          EmergencyStatus.unverified.name,
+          EmergencyStatus.accepted.name,
+          EmergencyStatus.inProgress.name,
+          EmergencyStatus.verified.name,
+          EmergencyStatus.escalated.name,
+        ])
+        .orderBy('createdAt', descending: true)
+        .snapshots()
+        .map((snapshot) {
+      return snapshot.docs.map((doc) => Emergency.fromFirestore(doc)).toList();
+    });
+  }
+
+  /// Update getUserActiveEmergency to check both group and solo emergencies
+  static Future<Emergency?> getUserActiveEmergencyEnhanced(String userId) async {
+    try {
+      // First check for solo emergency
+      final soloEmergency = await getUserActiveSoloEmergency(userId);
+      if (soloEmergency != null) {
+        return soloEmergency;
+      }
+
+      // Then check for group emergency (existing logic)
+      return await getUserActiveEmergency(userId);
+      
+    } catch (e) {
+      AppLogger.logError('Error getting user active emergency (enhanced)', e);
+      return null;
+    }
+  }
+
+  // =====================================================================
+  // ENHANCED METHODS FOR DUAL RESOLUTION AND NOTIFICATIONS
+  // =====================================================================
+
+  /// Update emergency document in database
+  static Future<void> updateEmergency(String emergencyId, Emergency emergency) async {
+    try {
+      await _firestore
+          .collection(_collection)
+          .doc(emergencyId)
+          .set(emergency.toFirestore(), SetOptions(merge: true));
+      
+      AppLogger.logInfo('Emergency updated: $emergencyId');
+    } catch (e) {
+      AppLogger.logError('Error updating emergency', e);
+      rethrow;
+    }
+  }
+
+  /// Update emergency status with optional timestamp
+  static Future<void> updateEmergencyStatus(
+    String emergencyId,
+    EmergencyStatus status, {
+    DateTime? fullyResolvedAt,
+  }) async {
+    try {
+      final updateData = <String, dynamic>{
+        'status': status.name,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      if (fullyResolvedAt != null) {
+        updateData['fullyResolvedAt'] = Timestamp.fromDate(fullyResolvedAt);
+      }
+
+      await _firestore
+          .collection(_collection)
+          .doc(emergencyId)
+          .update(updateData);
+      
+      AppLogger.logInfo('Emergency status updated: $emergencyId -> ${status.name}');
+    } catch (e) {
+      AppLogger.logError('Error updating emergency status', e);
+      rethrow;
+    }
+  }
+
+  /// Listen to user's emergency status for real-time updates
+  static Stream<Emergency?> listenToUserEmergencyStatus(String userId) {
+    return _firestore
+        .collection(_collection)
+        .where('attendeeId', isEqualTo: userId)
+        .where('status', whereNotIn: ['resolved', 'fake'])
+        .orderBy('createdAt', descending: true)
+        .limit(1)
+        .snapshots()
+        .map((snapshot) {
+      if (snapshot.docs.isEmpty) return null;
+      return Emergency.fromFirestore(snapshot.docs.first);
+    });
+  }
+
+  /// Listen to specific emergency updates for real-time sync
+  static Stream<Emergency?> listenToEmergencyUpdates(String emergencyId) {
+    return _firestore
+        .collection(_collection)
+        .doc(emergencyId)
+        .snapshots()
+        .map((snapshot) {
+      if (!snapshot.exists) return null;
+      return Emergency.fromFirestore(snapshot);
+    });
+  }
 }

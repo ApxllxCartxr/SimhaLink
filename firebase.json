@@ -1,24 +1,30 @@
 {
-	"functions": {
-		"source": "functions"
-	},
-	"flutter": {
-		"platforms": {
-			"android": {
-				"default": {
-					"projectId": "simhalink-f5ddd",
-					"appId": "1:672973153766:android:883ab0d7dc9ef86f902227",
-					"fileOutput": "android/app/google-services.json"
-				}
-			},
-			"dart": {
-				"lib/firebase_options.dart": {
-					"projectId": "simhalink-f5ddd",
-					"configurations": {
-						"android": "1:672973153766:android:883ab0d7dc9ef86f902227"
-					}
-				}
-			}
-		}
-	}
+  "functions": {
+    "source": "functions"
+  },
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "simhalink-f5ddd",
+          "appId": "1:672973153766:android:883ab0d7dc9ef86f902227",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "simhalink-f5ddd",
+          "configurations": {
+            "android": "1:672973153766:android:883ab0d7dc9ef86f902227"
+          }
+        }
+      }
+    }
+  },
+  "firestore": {
+    "database": "(default)",
+    "location": "asia-south1",
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
 }

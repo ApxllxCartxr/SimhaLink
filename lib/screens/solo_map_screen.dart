@@ -15,7 +15,6 @@ import 'package:simha_link/utils/error_handler.dart';
 import 'package:simha_link/services/routing_service.dart';
 import 'package:simha_link/config/app_colors.dart';
 import 'package:simha_link/core/utils/app_logger.dart';
-import 'package:simha_link/services/geographic_marker_service.dart' as geo;
 
 // Import the new managers and widgets
 import 'map/managers/location_manager.dart';
@@ -29,21 +28,17 @@ import '../models/emergency_response.dart';
 import '../services/emergency_management_service.dart';
 import '../services/emergency_database_service.dart';
 import '../models/emergency.dart';
-import '../widgets/attendee_emergency_status_widget.dart';
 
-class MapScreen extends StatefulWidget {
-  final String groupId;
-  
-  const MapScreen({
+class SoloMapScreen extends StatefulWidget {
+  const SoloMapScreen({
     super.key,
-    required this.groupId,
   });
 
   @override
-  State<MapScreen> createState() => _MapScreenState();
+  State<SoloMapScreen> createState() => _SoloMapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
+class _SoloMapScreenState extends State<SoloMapScreen> with TickerProviderStateMixin {
   final _mapController = MapController();
   
   // Managers
@@ -52,15 +47,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   late MarkerManager _markerManager;
   
   // New Emergency Database System - Unified approach
-  StreamSubscription<List<Emergency>>? _emergenciesSubscription;
-  List<StreamSubscription<List<Emergency>>> _additionalEmergencySubscriptions = [];
+  StreamSubscription? _emergenciesSubscription;
+  List<StreamSubscription> _additionalEmergencySubscriptions = [];
   List<Emergency> _activeEmergencies = [];
   Emergency? _currentEmergencyResponse; // Current emergency volunteer is responding to
   final Set<String> _notifiedEmergencies = <String>{};
-  
-  // NEW: Attendee emergency status tracking
-  StreamSubscription<Emergency?>? _userEmergencySubscription;
-  Emergency? _userActiveEmergency;
   
   // Data streams
   StreamSubscription<QuerySnapshot>? _groupLocationsSubscription;
@@ -91,7 +82,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   void _initializeManagers() {
     _locationManager = LocationManager(
-      groupId: widget.groupId,
+      groupId: null, // Solo mode - no group
       userRole: _userRole,
       isEmergency: _isEmergency,
     );
@@ -113,51 +104,39 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       final userId = FirebaseAuth.instance.currentUser?.uid;
       if (userId != null) {
         AppLogger.logInfo('Cleaning up stale emergencies for user: $userId');
+        
+        // Check for existing solo emergency and restore state if found
+        final existingSoloEmergency = await EmergencyDatabaseService.getUserActiveSoloEmergency(userId);
+        if (existingSoloEmergency != null) {
+          setState(() {
+            _isEmergency = true;
+            _locationManager.isEmergency = true;
+          });
+          _locationManager.updateEmergencyStatus(true);
+          AppLogger.logInfo('Restored existing solo emergency state');
+        }
+        
         await EmergencyDatabaseService.cleanupUserEmergencies(userId);
       }
       
       // Cancel any existing subscription to prevent memory leaks
       _emergenciesSubscription?.cancel();
+      for (final subscription in _additionalEmergencySubscriptions) {
+        subscription.cancel();
+      }
+      _additionalEmergencySubscriptions.clear();
       
       // Listen to emergencies based on user role
       AppLogger.logInfo('Setting up emergency listeners for role: $_userRole');
       
       if (_userRole?.toLowerCase() == 'volunteer') {
-        // VOLUNTEERS see ALL emergencies from ALL groups - Use same approach as attendees but for all groups
-        AppLogger.logInfo('Volunteer detected - listening to ALL group emergencies without indexes');
-        await _listenToAllGroupEmergenciesForVolunteers();
+        // VOLUNTEERS see ALL emergencies (both group and solo)
+        AppLogger.logInfo('Volunteer detected - listening to ALL emergencies (group + solo)');
+        await _listenToAllEmergenciesForVolunteers();
       } else {
-        // ATTENDEES and ORGANIZERS see only their group emergencies
-        AppLogger.logInfo('Non-volunteer (${_userRole ?? 'Unknown'}) detected - listening to group ${widget.groupId} emergencies only');
-        _emergenciesSubscription = EmergencyManagementService.listenToGroupEmergencies(
-          widget.groupId,
-          (emergencies) {
-            if (!mounted) return;
-            
-            AppLogger.logInfo('Group received ${emergencies.length} emergencies: ${emergencies.map((e) => '${e.attendeeName} (${e.emergencyId})').join(', ')}');
-            
-            setState(() {
-              _activeEmergencies = emergencies;
-              
-              // CRITICAL: Restore emergency state for attendees across login/logout
-              if (_userRole == 'Attendee') {
-                final userId = FirebaseAuth.instance.currentUser?.uid;
-                final hasActiveEmergency = emergencies.any((emergency) => 
-                  emergency.attendeeId == userId && emergency.isActive); // Use isActive property
-                
-                if (_isEmergency != hasActiveEmergency) {
-                  _isEmergency = hasActiveEmergency;
-                  _locationManager.isEmergency = hasActiveEmergency;
-                  _locationManager.updateEmergencyStatus(hasActiveEmergency);
-                  
-                  AppLogger.logInfo('Emergency state restored from database: $_isEmergency');
-                }
-              }
-            });
-            
-            AppLogger.logInfo('Group emergency data updated: ${emergencies.length} active emergencies in group ${widget.groupId}');
-          },
-        );
+        // SOLO ATTENDEES see only solo emergencies
+        AppLogger.logInfo('Solo attendee mode - listening to solo emergencies only');
+        await _listenToSoloEmergencies();
       }
       
       // Add error handling for the subscription
@@ -187,108 +166,171 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         });
       });
       
-      // Disable old emergency manager listeners to prevent conflicts
-      // _emergencyManager.dispose(); // REMOVED - No longer using old UserLocation-based system
-      
-      AppLogger.logInfo('Emergency management initialized - Role: $_userRole, listening to ${_userRole == 'Volunteer' ? 'ALL' : 'GROUP'} emergencies');
+      AppLogger.logInfo('Solo mode emergency management initialized - Role: $_userRole');
     } catch (e) {
-      AppLogger.logError('Error initializing emergency management', e);
+      AppLogger.logError('Error initializing solo emergency management', e);
       
       // Retry initialization after a delay
       Future.delayed(const Duration(seconds: 3), () {
         if (mounted) {
-          AppLogger.logInfo('Retrying emergency management initialization...');
+          AppLogger.logInfo('Retrying solo emergency management initialization...');
           _initializeEmergencyManagement();
         }
       });
     }
   }
 
-  /// Listen to all group emergencies for volunteers (avoiding Firebase indexes)
-  Future<void> _listenToAllGroupEmergenciesForVolunteers() async {
+  /// Listen to all emergencies for volunteers (both group and solo)
+  Future<void> _listenToAllEmergenciesForVolunteers() async {
     try {
-      // Get all groups first
+      List<StreamSubscription> allSubscriptions = [];
+      
+      // 1. Listen to solo emergencies
+      final soloSubscription = FirebaseFirestore.instance
+          .collection('solo_emergencies')
+          .where('status', whereIn: [
+            EmergencyStatus.unverified.name,
+            EmergencyStatus.accepted.name,
+            EmergencyStatus.inProgress.name,
+            EmergencyStatus.verified.name,
+            EmergencyStatus.escalated.name,
+          ])
+          .snapshots()
+          .listen((snapshot) {
+        if (!mounted) return;
+        
+        try {
+          final soloEmergencies = snapshot.docs
+              .map((doc) => Emergency.fromFirestore(doc))
+              .where((emergency) => emergency.status.visibleToVolunteers)
+              .toList();
+          
+          AppLogger.logInfo('Volunteer received ${soloEmergencies.length} solo emergencies');
+          
+          setState(() {
+            // Remove old solo emergencies and add new ones
+            _activeEmergencies = _activeEmergencies
+                .where((emergency) => emergency.groupId != 'solo_mode')
+                .toList();
+            
+            _activeEmergencies.addAll(soloEmergencies);
+            
+            // Sort by creation time (newest first)
+            _activeEmergencies.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+          });
+          
+          // Show notifications for new solo emergencies
+          _handleNewEmergencyNotifications(soloEmergencies);
+          
+          AppLogger.logInfo('Volunteer total active emergencies (including solo): ${_activeEmergencies.length}');
+        } catch (e) {
+          AppLogger.logError('Error processing solo emergencies', e);
+        }
+      });
+      
+      allSubscriptions.add(soloSubscription);
+
+      // 2. Listen to group emergencies
       final groupsSnapshot = await FirebaseFirestore.instance
           .collection('groups')
           .get();
 
-      List<StreamSubscription<List<Emergency>>> groupSubscriptions = [];
-
-      // Listen to each group's emergencies separately (same method attendees use)
+      // Listen to each group's emergencies separately
       for (final groupDoc in groupsSnapshot.docs) {
         final groupId = groupDoc.id;
         AppLogger.logInfo('Volunteer listening to group: $groupId');
         
-        // Use the same method that works for attendees - EmergencyManagementService.listenToGroupEmergencies
-        final subscription = EmergencyManagementService.listenToGroupEmergencies(
-          groupId,
-          (groupEmergencies) {
-            if (!mounted) return;
+        final groupSubscription = FirebaseFirestore.instance
+            .collection('groups')
+            .doc(groupId)
+            .collection('emergencies')
+            .where('status', whereIn: [
+              EmergencyStatus.unverified.name,
+              EmergencyStatus.accepted.name,
+              EmergencyStatus.inProgress.name,
+              EmergencyStatus.verified.name,
+              EmergencyStatus.escalated.name,
+            ])
+            .snapshots()
+            .listen((snapshot) {
+          if (!mounted) return;
+          
+          try {
+            final groupEmergencies = snapshot.docs
+                .map((doc) => Emergency.fromFirestore(doc))
+                .where((emergency) => emergency.status.visibleToVolunteers)
+                .toList();
             
-            try {
-              AppLogger.logInfo('Volunteer received ${groupEmergencies.length} emergencies from group $groupId');
+            AppLogger.logInfo('Volunteer received ${groupEmergencies.length} emergencies from group $groupId');
+            
+            setState(() {
+              // Remove old emergencies from this group and add new ones
+              _activeEmergencies = _activeEmergencies
+                  .where((emergency) => emergency.groupId != groupId)
+                  .toList();
               
-              // Update the combined list of emergencies
-              setState(() {
-                // Remove old emergencies from this group and add new ones
-                _activeEmergencies = _activeEmergencies
-                    .where((emergency) => emergency.groupId != groupId)
-                    .toList();
-                
-                // FILTER: Only add emergencies visible to volunteers (exclude fake/resolved)
-                final visibleEmergencies = groupEmergencies
-                    .where((emergency) => emergency.status.visibleToVolunteers)
-                    .toList();
-                    
-                _activeEmergencies.addAll(visibleEmergencies);
-                
-                // Sort by creation time (newest first)
-                _activeEmergencies.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-              });
+              _activeEmergencies.addAll(groupEmergencies);
               
-              // Show notifications for new emergencies
-              _handleNewEmergencyNotifications(groupEmergencies);
-              
-              AppLogger.logInfo('Volunteer total active emergencies: ${_activeEmergencies.length}');
-            } catch (e) {
-              AppLogger.logError('Error processing emergencies for group $groupId', e);
-            }
-          },
-        );
+              // Sort by creation time (newest first)
+              _activeEmergencies.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+            });
+            
+            // Show notifications for new group emergencies
+            _handleNewEmergencyNotifications(groupEmergencies);
+            
+            AppLogger.logInfo('Volunteer total active emergencies: ${_activeEmergencies.length}');
+          } catch (e) {
+            AppLogger.logError('Error processing emergencies for group $groupId', e);
+          }
+        });
         
-        groupSubscriptions.add(subscription);
+        allSubscriptions.add(groupSubscription);
       }
 
-      // Store the subscription for cleanup (we'll use the first one as the main subscription)
-      if (groupSubscriptions.isNotEmpty) {
-        _emergenciesSubscription = groupSubscriptions.first;
-        
-        // Store additional subscriptions for cleanup
-        _additionalEmergencySubscriptions = groupSubscriptions.skip(1).toList();
+      // Store subscriptions for cleanup
+      if (allSubscriptions.isNotEmpty) {
+        _emergenciesSubscription = allSubscriptions.first;
+        _additionalEmergencySubscriptions = allSubscriptions.skip(1).toList();
       }
       
-      AppLogger.logInfo('Volunteer listening to ${groupsSnapshot.docs.length} groups for emergencies');
+      AppLogger.logInfo('Volunteer listening to ${groupsSnapshot.docs.length} groups + solo emergencies');
     } catch (e) {
       AppLogger.logError('Error setting up volunteer emergency listening', e);
       
-      // Fallback to single group listening if there's an error
+      // Fallback - at least listen to solo emergencies
       if (mounted) {
-        _emergenciesSubscription = EmergencyManagementService.listenToGroupEmergencies(
-          widget.groupId,
-          (emergencies) {
-            if (!mounted) return;
-            
-            setState(() {
-              _activeEmergencies = emergencies;
-            });
-            
-            _handleNewEmergencyNotifications(emergencies);
-            
-            AppLogger.logInfo('Volunteer fallback - listening to current group only: ${emergencies.length} emergencies');
-          },
-        );
+        _listenToSoloEmergencies();
       }
     }
+  }
+
+  /// Listen to solo emergencies only (for solo attendees)
+  Future<void> _listenToSoloEmergencies() async {
+    AppLogger.logInfo('Solo mode - listening to solo emergencies only');
+    
+    _emergenciesSubscription = FirebaseFirestore.instance
+        .collection('solo_emergencies')
+        .where('status', whereIn: [
+          EmergencyStatus.unverified.name,
+          EmergencyStatus.accepted.name,
+          EmergencyStatus.inProgress.name,
+          EmergencyStatus.verified.name,
+          EmergencyStatus.escalated.name,
+        ])
+        .snapshots()
+        .listen((snapshot) {
+      if (!mounted) return;
+      
+      final soloEmergencies = snapshot.docs
+          .map((doc) => Emergency.fromFirestore(doc))
+          .toList();
+      
+      setState(() {
+        _activeEmergencies = soloEmergencies;
+      });
+      
+      AppLogger.logInfo('Solo mode: ${_activeEmergencies.length} solo emergencies active');
+    });
   }
 
   /// Handle new emergency notifications for volunteers
@@ -346,15 +388,34 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _setupInitialData() async {
+    // Phase 1: Critical initial setup
     await _getUserRole();
     await _setupLocationTracking();
-    _listenToGroupLocations();
-    _listenToPOIs();
-    _startEmergencyListeners();
-    // NEW: Listen to user's emergency status for attendees
-    _listenToUserEmergencyStatus();
-    // Initialize emergency management AFTER user role is fetched
+    
+    // Phase 2: Emergency management (high priority)
     await _initializeEmergencyManagement();
+    
+    // Phase 3: Defer non-critical components with a small delay
+    Future.delayed(const Duration(milliseconds: 100), () {
+      if (mounted) {
+        _listenToGroupLocations();
+      }
+    });
+    
+    Future.delayed(const Duration(milliseconds: 200), () {
+      if (mounted) {
+        _listenToPOIs();
+      }
+    });
+    
+    Future.delayed(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        _startEmergencyListeners();
+      }
+    });
+    
+    // DEBUG: Log current emergency state
+    AppLogger.logInfo('SOLO MAP DEBUG - Emergency state: $_isEmergency, Active emergencies: ${_activeEmergencies.length}');
   }
 
   Future<void> _getUserRole() async {
@@ -409,34 +470,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   void _listenToGroupLocations() {
-    _groupLocationsSubscription = FirebaseFirestore.instance
-        .collection('groups')
-        .doc(widget.groupId)
-        .collection('locations')
-        .snapshots()
-        .listen((snapshot) {
-      if (mounted) {
-        final allMembers = snapshot.docs
-            .map((doc) => UserLocation.fromMap(doc.data()))
-            .toList();
-        
-        List<UserLocation> filteredMembers;
-        if (_userRole == 'Attendee') {
-          final now = DateTime.now();
-          final activeThreshold = now.subtract(const Duration(minutes: 5));
-          
-          filteredMembers = allMembers.where((member) {
-            return member.lastUpdated.isAfter(activeThreshold);
-          }).toList();
-        } else {
-          filteredMembers = allMembers;
-        }
-        
-        setState(() {
-          _groupMembers = filteredMembers;
-        });
-      }
+    // SOLO MODE: No group location tracking
+    AppLogger.logInfo('Solo mode - group location tracking disabled');
+    setState(() {
+      _groupMembers = []; // No group members in solo mode
     });
+    return;
   }
 
   void _listenToPOIs() {
@@ -451,51 +490,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               .toList();
         });
       }
-    });
-  }
-
-  /// Listen to user's emergency status for attendees (enhanced communication system)
-  void _listenToUserEmergencyStatus() {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null || _userRole != 'Attendee') return;
-
-    print('🔄 Setting up attendee emergency listener for user: ${currentUser.uid}');
-    
-    _userEmergencySubscription = EmergencyManagementService.listenToUserEmergencyStatus(currentUser.uid)
-        .listen((emergency) {
-      if (mounted) {
-        print('📥 Emergency update received: ${emergency?.emergencyId ?? 'none'}');
-        if (emergency != null) {
-          print('📊 Emergency data: status=${emergency.status.name}, notifications=${emergency.attendeeNotifications.length}, resolved=${emergency.resolvedBy.attendee}');
-          print('🔧 Volunteer responses: ${emergency.responses.length}'); // ADD THIS LINE
-          
-          // DEBUGGING: Print volunteer statuses
-          for (final response in emergency.responses.values) {
-            print('👤 Volunteer: ${response.volunteerName} - Status: ${response.status.name}');
-          }
-        }
-        
-        // FIXED: Check if emergency is active (not cancelled, fake, or resolved)
-        // Let the widget handle its own resolution logic
-        final hasActiveEmergency = emergency != null && emergency.isActive;
-        
-        print('🎯 Emergency status check: hasActive=$hasActiveEmergency, status=${emergency?.status.name}, isActive=${emergency?.isActive}, isFullyResolved=${emergency?.isFullyResolved}');
-        
-        setState(() {
-          _userActiveEmergency = hasActiveEmergency ? emergency : null;
-          // Only consider emergency active if it's actually active and not fully resolved
-          _isEmergency = hasActiveEmergency && !emergency.isFullyResolved;
-          _locationManager.isEmergency = _isEmergency;
-        });
-        
-        // Update location manager emergency status
-        _locationManager.updateEmergencyStatus(emergency != null);
-        
-        AppLogger.logInfo('User emergency status updated: ${emergency?.emergencyId ?? 'none'}');
-      }
-    }, onError: (error) {
-      print('❌ Error in attendee emergency stream: $error');
-      AppLogger.logError('Error in attendee emergency stream', error);
     });
   }
 
@@ -516,11 +510,11 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
     try {
       if (!_isEmergency) {
-        // STRICT ENFORCEMENT: Check for existing emergency before creating
+        // STRICT ENFORCEMENT: Check for existing emergency before creating (both group and solo)
         AppLogger.logInfo('Checking for existing emergency before creation...');
-        final existingEmergency = await EmergencyDatabaseService.getUserActiveEmergency(userId);
-        if (existingEmergency != null) {
-          AppLogger.logWarning('BLOCKED: User $userId already has active emergency: ${existingEmergency.emergencyId}');
+        final existingGroupEmergency = await EmergencyDatabaseService.getUserActiveEmergency(userId);
+        if (existingGroupEmergency != null) {
+          AppLogger.logWarning('BLOCKED: User $userId already has active group emergency: ${existingGroupEmergency.emergencyId}');
           
           // Update UI state to reflect existing emergency
           setState(() {
@@ -540,7 +534,29 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           return; // HARD STOP - Don't create a new emergency
         }
 
-        // CREATING NEW EMERGENCY - Unified system
+        final existingSoloEmergency = await EmergencyDatabaseService.getUserActiveSoloEmergency(userId);
+        if (existingSoloEmergency != null) {
+          AppLogger.logWarning('BLOCKED: User $userId already has active solo emergency: ${existingSoloEmergency.emergencyId}');
+          
+          // Update UI state to reflect existing emergency
+          setState(() {
+            _isEmergency = true;
+            _locationManager.isEmergency = true;
+          });
+          _locationManager.updateEmergencyStatus(true);
+          
+          if (mounted) {
+            _showTopSnackBar(
+              message: '🚨 You already have an active solo emergency! Only one emergency per user allowed.',
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 4),
+              icon: const Icon(Icons.block, color: Colors.white),
+            );
+          }
+          return; // HARD STOP - Don't create a new emergency
+        }
+
+        // CREATING NEW SOLO EMERGENCY
         if (_locationManager.currentLocation == null) {
           throw Exception('Location not available');
         }
@@ -550,64 +566,37 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           _locationManager.currentLocation!.longitude!,
         );
         
-        // Create emergency using unified system
-        final emergency = await EmergencyDatabaseService.createEmergencyWithState(
+        // Create solo emergency using new service
+        final emergency = await EmergencyDatabaseService.createSoloEmergency(
           attendeeId: userId,
-          attendeeName: FirebaseAuth.instance.currentUser?.displayName ?? 'Unknown User',
-          groupId: widget.groupId,
+          attendeeName: FirebaseAuth.instance.currentUser?.displayName ?? 'Solo User',
           location: currentLocation,
-          message: null,
+          message: 'Solo user emergency - no group affiliation',
         );
         
         // Update local state and location manager
         setState(() {
           _isEmergency = true;
-          _userActiveEmergency = emergency; // FIXED: Immediately show attendee widget
           _locationManager.isEmergency = true;
         });
-        
-        print('🎯 DEBUG: Emergency created and _userActiveEmergency set immediately: ${emergency.emergencyId}');
         
         // Update location manager for enhanced tracking
         _locationManager.updateEmergencyStatus(true);
         
         if (mounted) {
           _showTopSnackBar(
-            message: '🚨 Emergency activated! Volunteers have been notified.',
+            message: '🚨 Solo emergency activated! Volunteers have been notified.',
             backgroundColor: Colors.red,
             duration: const Duration(seconds: 4),
             icon: const Icon(Icons.emergency, color: Colors.white),
           );
         }
         
-        AppLogger.logInfo('Emergency created with unified system: ${emergency.emergencyId}');
+        AppLogger.logInfo('Solo emergency created: ${emergency.emergencyId}');
         
       } else {
-        // RESOLVING EXISTING EMERGENCY - Enhanced cleanup
-        // Find current user's emergency in active emergencies
-        final userId = FirebaseAuth.instance.currentUser?.uid;
-        if (userId != null) {
-          final userEmergency = _activeEmergencies.firstWhere(
-            (emergency) => emergency.attendeeId == userId,
-            orElse: () => Emergency(
-              emergencyId: '',
-              attendeeId: '',
-              attendeeName: '',
-              groupId: '',
-              location: const LatLng(0, 0),
-              status: EmergencyStatus.resolved,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
-              responses: {},
-              resolvedBy: const EmergencyResolution(attendee: false, hasVolunteerCompleted: false),
-            ),
-          );
-          
-          if (userEmergency.emergencyId.isNotEmpty) {
-            // Resolve emergency with complete cleanup
-            await EmergencyManagementService.resolveEmergency(userEmergency.emergencyId);
-          }
-        }
+        // RESOLVING EXISTING SOLO EMERGENCY
+        await EmergencyDatabaseService.resolveSoloEmergency(userId);
         
         // Update local state and location manager
         setState(() {
@@ -620,7 +609,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         
         if (mounted) {
           _showTopSnackBar(
-            message: '✅ Emergency resolved! Thank you for your safety.',
+            message: '✅ Solo emergency resolved! Thank you for your safety.',
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 3),
             icon: const Icon(Icons.check_circle, color: Colors.white),
@@ -1131,7 +1120,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       _groupLocationsSubscription?.cancel();
       _poisSubscription?.cancel();
       _emergenciesSubscription?.cancel();
-      _userEmergencySubscription?.cancel(); // NEW: Cancel attendee emergency stream
       
       // Cancel additional emergency subscriptions for volunteers
       for (final subscription in _additionalEmergencySubscriptions) {
@@ -1222,6 +1210,42 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                           : AppColors.mapCurrentUser.withOpacity(0.2),
                       borderColor: _isEmergency ? AppColors.mapEmergency : AppColors.mapCurrentUser,
                       borderStrokeWidth: 2,
+                    ),
+                  ],
+                ),
+              // Current location marker (above circle)
+              if (_locationManager.currentLocation != null)
+                MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: LatLng(
+                        _locationManager.currentLocation!.latitude!,
+                        _locationManager.currentLocation!.longitude!
+                      ),
+                      width: 24,
+                      height: 24,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: _isEmergency ? AppColors.mapEmergency : AppColors.mapCurrentUser,
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: Colors.white,
+                            width: 3,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.3),
+                              blurRadius: 4,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Icon(
+                          _isEmergency ? Icons.emergency : Icons.my_location,
+                          color: Colors.white,
+                          size: 12,
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -1394,28 +1418,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           // Emergency Response Card for Volunteers - Connected to Database
           // Positioned with better spacing and responsiveness
           // Emergency Response Card for volunteers - positioned at bottom
-          // NEW: Attendee Emergency Status Widget for enhanced communication
-          if (_userRole == 'Attendee' && _userActiveEmergency != null) ...[
-            // DEBUG: Log when attendee widget shows
-            Builder(
-              builder: (context) {
-                print('🔍 DEBUG BUILD: Attendee emergency widget showing - Role: $_userRole, Emergency: ${_userActiveEmergency?.emergencyId}');
-                return Container();
-              },
-            ),
-            Positioned(
-              bottom: 7, // Below app bar
-              left: 16,
-              right: 16,
-              child: AttendeeEmergencyStatusWidget(
-                emergency: _userActiveEmergency!,
-                onResolve: _attendeeMarkResolved,
-                onCancel: _cancelEmergency,
-              ),
-            ),
-          ],
-
-          // Volunteer Emergency Response Card (existing)
           if (_userRole == 'Volunteer' && _currentEmergencyResponse != null) ...[
             // DEBUG: Log when card should show
             Builder(
@@ -1478,13 +1480,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                       _focusOnLocation(_currentEmergencyResponse!.location);
                     }
                   },
-                  onReportFakeAlarm: () => _reportFakeAlarm(_currentEmergencyResponse!),
                 ),
               ),
             ),
           ],
           
-          // Role info
+          // Role info with emergency debug info
           Positioned(
             top: 16,
             left: 16,
@@ -1492,17 +1493,54 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               color: Colors.white.withOpacity(0.9),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Text(
-                  _userRole == 'Attendee' ? 'Tap markers for directions' : 
-                  _userRole == 'Volunteer' ? 'Monitor emergencies & assist' :
-                  _userRole == 'Organizer' ? 
-                    (_isMarkerManagementMode ? 'Tap markers to manage them' : 'Long-press markers to manage them') : 
-                  'Map view',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _userRole == 'Attendee' ? 'Tap markers for directions' : 
+                      _userRole == 'Volunteer' ? 'Monitor emergencies & assist' :
+                      _userRole == 'Organizer' ? 
+                        (_isMarkerManagementMode ? 'Tap markers to manage them' : 'Long-press markers to manage them') : 
+                      'Map view',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    // DEBUG INFO
+                    if (_userRole == 'Attendee') ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Emergency: ${_isEmergency ? "ACTIVE" : "OFF"} | Emergencies: ${_activeEmergencies.length}',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: _isEmergency ? Colors.red : Colors.green,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      // Add force reset button for debugging
+                      const SizedBox(height: 4),
+                      GestureDetector(
+                        onTap: _forceResetEmergencyState,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.orange,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: const Text(
+                            'RESET EMERGENCY',
+                            style: TextStyle(
+                              fontSize: 8,
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
@@ -1510,6 +1548,46 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         ],
       ),
     );
+  }
+
+  /// DEBUG: Force reset emergency state (for testing)
+  Future<void> _forceResetEmergencyState() async {
+    try {
+      final userId = FirebaseAuth.instance.currentUser?.uid;
+      if (userId != null) {
+        AppLogger.logInfo('SOLO MAP DEBUG - Force resetting emergency state for user: $userId');
+        
+        // Force resolve any solo emergencies
+        await EmergencyDatabaseService.resolveSoloEmergency(userId);
+        
+        // Reset local state
+        setState(() {
+          _isEmergency = false;
+          _locationManager.isEmergency = false;
+          _activeEmergencies.clear();
+        });
+        
+        // Update location manager
+        _locationManager.updateEmergencyStatus(false);
+        
+        _showTopSnackBar(
+          message: '🔄 Emergency state force reset!',
+          backgroundColor: Colors.blue,
+          duration: const Duration(seconds: 2),
+          icon: const Icon(Icons.refresh, color: Colors.white),
+        );
+        
+        AppLogger.logInfo('SOLO MAP DEBUG - Emergency state reset complete');
+      }
+    } catch (e) {
+      AppLogger.logError('Error force resetting emergency state', e);
+      _showTopSnackBar(
+        message: '❌ Error resetting emergency state: $e',
+        backgroundColor: Colors.red,
+        duration: const Duration(seconds: 3),
+        icon: const Icon(Icons.error, color: Colors.white),
+      );
+    }
   }
 
   /// Helper method to show SnackBar at the top of the screen
@@ -1613,10 +1691,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           break;
           
         case EmergencyResponseStatus.completed:
-          // Use new dual resolution system
-          await EmergencyManagementService.volunteerMarkResolved(
+          // Resolve emergency
+          await EmergencyManagementService.volunteerResolveEmergency(
             emergencyId: emergency.emergencyId,
-            notes: 'Assistance completed by volunteer',
           );
           
           // Clear current emergency response
@@ -1625,9 +1702,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           });
           
           _showTopSnackBar(
-            message: '✅ Emergency assistance completed. Awaiting attendee confirmation.',
+            message: '✅ Emergency marked as resolved',
             backgroundColor: Colors.green,
-            duration: const Duration(seconds: 4),
+            duration: const Duration(seconds: 3),
             icon: const Icon(Icons.check_circle, color: Colors.white),
           );
           print('✅ Emergency resolved by volunteer');
@@ -1653,9 +1730,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       // Refresh the emergency data to reflect the updated status
       await _refreshCurrentEmergencyData(emergency.emergencyId);
       
-      // NEW: Notify attendee of volunteer status change
-      await _notifyAttendeeOfStatusChange(emergency, newStatus, userId);
-      
       // Show confirmation message
       if (mounted) {
         _showTopSnackBar(
@@ -1676,181 +1750,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           icon: const Icon(Icons.error, color: Colors.white),
         );
       }
-    }
-  }
-
-  /// Report emergency as false alarm by volunteer
-  Future<void> _reportFakeAlarm(Emergency emergency) async {
-    try {
-      // Show confirmation dialog with reason input
-      final result = await showDialog<Map<String, dynamic>>(
-        context: context,
-        builder: (context) => _buildFakeAlarmDialog(),
-      );
-
-      if (result == null || result['confirmed'] != true) return;
-
-      print('⚠️ Volunteer reporting emergency as fake: ${emergency.emergencyId}');
-
-      // Use enhanced fake alarm reporting system
-      await EmergencyManagementService.markEmergencyAsFake(
-        emergencyId: emergency.emergencyId,
-        reason: result['reason'] ?? 'False alarm reported by volunteer',
-      );
-
-      // Clear current emergency response
-      setState(() {
-        _currentEmergencyResponse = null;
-      });
-
-      print('✅ Emergency successfully marked as fake alarm');
-    } catch (e) {
-      if (mounted) {
-        _showTopSnackBar(
-          message: '❌ Failed to report false alarm: $e',
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 3),
-          icon: const Icon(Icons.error, color: Colors.white),
-        );
-      }
-    }
-  }
-
-  /// Build fake alarm reporting dialog
-  Widget _buildFakeAlarmDialog() {
-    final reasonController = TextEditingController();
-    String selectedReason = 'No emergency found';
-    
-    return StatefulBuilder(
-      builder: (context, setState) => AlertDialog(
-        title: const Text('Report False Alarm'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Are you sure this is a false alarm? This will notify the attendee and close the emergency.',
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Reason for false alarm:',
-                style: TextStyle(fontWeight: FontWeight.w500),
-              ),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: selectedReason,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  'No emergency found',
-                  'Location is empty',
-                  'Attendee not present',
-                  'Situation already resolved',
-                  'Duplicate emergency',
-                  'Accidental activation',
-                  'Other',
-                ].map((reason) => DropdownMenuItem(
-                  value: reason,
-                  child: Text(reason),
-                )).toList(),
-                onChanged: (value) {
-                  setState(() {
-                    selectedReason = value!;
-                  });
-                },
-              ),
-              if (selectedReason == 'Other') ...[
-                const SizedBox(height: 12),
-                TextField(
-                  controller: reasonController,
-                  decoration: const InputDecoration(
-                    hintText: 'Please specify...',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 2,
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop({'confirmed': false}),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop({
-              'confirmed': true,
-              'reason': selectedReason == 'Other' 
-                  ? reasonController.text.trim()
-                  : selectedReason,
-            }),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-            child: const Text('Report False Alarm'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Notify attendee of volunteer status changes
-  Future<void> _notifyAttendeeOfStatusChange(
-    Emergency emergency, 
-    EmergencyResponseStatus newStatus, 
-    String volunteerId
-  ) async {
-    try {
-      // Get current location for distance calculation
-      LatLng? currentLocation;
-      final locationData = _locationManager.currentLocation;
-      if (locationData?.latitude != null && locationData?.longitude != null) {
-        currentLocation = LatLng(locationData!.latitude!, locationData.longitude!);
-      }
-
-      // Map EmergencyResponseStatus to EmergencyVolunteerStatus
-      EmergencyVolunteerStatus volunteerStatus;
-      switch (newStatus) {
-        case EmergencyResponseStatus.responding:
-          volunteerStatus = EmergencyVolunteerStatus.responding;
-          break;
-        case EmergencyResponseStatus.enRoute:
-          volunteerStatus = EmergencyVolunteerStatus.enRoute;
-          break;
-        case EmergencyResponseStatus.arrived:
-          volunteerStatus = EmergencyVolunteerStatus.arrived;
-          break;
-        case EmergencyResponseStatus.verified:
-          volunteerStatus = EmergencyVolunteerStatus.verified;
-          break;
-        case EmergencyResponseStatus.assisting:
-          volunteerStatus = EmergencyVolunteerStatus.assisting;
-          break;
-        case EmergencyResponseStatus.completed:
-          volunteerStatus = EmergencyVolunteerStatus.completed;
-          break;
-        default:
-          return; // Don't notify for other statuses
-      }
-
-      // Get volunteer name
-      final currentUser = FirebaseAuth.instance.currentUser;
-      final volunteerName = currentUser?.displayName ?? 'Unknown Volunteer';
-
-      // Send notification to attendee
-      await EmergencyManagementService.notifyAttendeeOfVolunteerStatus(
-        emergencyId: emergency.emergencyId,
-        volunteerId: volunteerId,
-        volunteerName: volunteerName,
-        newStatus: volunteerStatus,
-        volunteerLocation: currentLocation,
-      );
-
-      AppLogger.logInfo('Attendee notified of status change: ${newStatus.name}');
-    } catch (e) {
-      AppLogger.logError('Error notifying attendee of status change', e);
-      // Don't rethrow - this is a background operation
     }
   }
 
@@ -1893,44 +1792,25 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Future<void> _resolveEmergency(String emergencyId) async {
     try {
       if (_userRole == 'Attendee') {
-        // Attendee resolving their own emergency using new system
+        // Attendee resolving their own solo emergency
         final userId = FirebaseAuth.instance.currentUser?.uid;
         if (userId != null) {
-          // Find current user's emergency in active emergencies
-          final userEmergency = _activeEmergencies.firstWhere(
-            (emergency) => emergency.attendeeId == userId,
-            orElse: () => Emergency(
-              emergencyId: '',
-              attendeeId: '',
-              attendeeName: '',
-              groupId: '',
-              location: const LatLng(0, 0),
-              status: EmergencyStatus.resolved,
-              createdAt: DateTime.now(),
-              updatedAt: DateTime.now(),
-              responses: {},
-              resolvedBy: const EmergencyResolution(attendee: false, hasVolunteerCompleted: false),
-            ),
-          );
+          // Use solo emergency resolution service directly
+          await EmergencyDatabaseService.resolveSoloEmergency(userId);
           
-          if (userEmergency.emergencyId.isNotEmpty) {
-            // Resolve emergency using new system
-            await EmergencyManagementService.resolveEmergency(userEmergency.emergencyId);
-            
-            // Update local state
-            setState(() {
-              _isEmergency = false;
-              _locationManager.isEmergency = false;
-            });
-            
-            // Update location manager to normal tracking
-            _locationManager.updateEmergencyStatus(false);
-          }
+          // Update local state
+          setState(() {
+            _isEmergency = false;
+            _locationManager.isEmergency = false;
+          });
+          
+          // Update location manager to normal tracking
+          _locationManager.updateEmergencyStatus(false);
         }
         
         if (mounted) {
           _showTopSnackBar(
-            message: '✅ Emergency resolved! Thank you for your safety.',
+            message: '✅ Solo emergency resolved! Thank you for your safety.',
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 3),
             icon: const Icon(Icons.check_circle, color: Colors.white),
@@ -1993,220 +1873,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       // Log error but don't show to user as this is background cleanup
       AppLogger.logError('Error checking emergency resolution status', e);
     }
-  }
-
-  /// Enhanced attendee mark resolved with dual resolution system
-  Future<void> _attendeeMarkResolved() async {
-    if (_userActiveEmergency == null) return;
-
-    try {
-      // Show confirmation dialog with enhanced options
-      final result = await showDialog<Map<String, dynamic>>(
-        context: context,
-        builder: (context) => _buildResolveDialog(),
-      );
-
-      if (result == null || result['confirmed'] != true) return;
-
-      print('🔧 Attendee marking emergency as resolved: ${_userActiveEmergency!.emergencyId}');
-
-      // Use enhanced resolution system with notes
-      await EmergencyManagementService.attendeeResolveEmergencyV2(
-        emergencyId: _userActiveEmergency!.emergencyId,
-        notes: result['notes'] ?? 'Emergency resolved by attendee',
-      );
-
-      print('✅ Emergency successfully marked as resolved by attendee');
-    } catch (e) {
-      if (mounted) {
-        _showTopSnackBar(
-          message: '❌ Failed to mark emergency as resolved: $e',
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 3),
-          icon: const Icon(Icons.error, color: Colors.white),
-        );
-      }
-    }
-  }
-
-  /// Enhanced cancel emergency for attendee
-  Future<void> _cancelEmergency() async {
-    if (_userActiveEmergency == null) return;
-
-    try {
-      // Show cancellation dialog with reason input
-      final result = await showDialog<Map<String, dynamic>>(
-        context: context,
-        builder: (context) => _buildCancelDialog(),
-      );
-
-      if (result == null || result['confirmed'] != true) return;
-
-      print('🚫 Attendee cancelling emergency: ${_userActiveEmergency!.emergencyId}');
-
-      // Use enhanced cancellation system
-      await EmergencyManagementService.cancelEmergency(
-        emergencyId: _userActiveEmergency!.emergencyId,
-        reason: result['reason'] ?? 'Cancelled by attendee',
-      );
-
-      // FIXED: Add the same state updates as FAB toggle
-      setState(() {
-        _isEmergency = false;
-        _userActiveEmergency = null; // Clear the active emergency
-        _locationManager.isEmergency = false;
-      });
-      
-      // FIXED: Update location manager to normal tracking (same as FAB)
-      _locationManager.updateEmergencyStatus(false);
-
-      // FIXED: Show the same success message style as FAB
-      if (mounted) {
-        _showTopSnackBar(
-          message: '✅ Emergency cancelled! All volunteers have been notified.',
-          backgroundColor: Colors.green, // Same color as FAB success
-          duration: const Duration(seconds: 3),
-          icon: const Icon(Icons.check_circle, color: Colors.white),
-        );
-      }
-
-      print('✅ Emergency successfully cancelled by attendee');
-    } catch (e) {
-      if (mounted) {
-        _showTopSnackBar(
-          message: '❌ Failed to cancel emergency: $e',
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 3),
-          icon: const Icon(Icons.error, color: Colors.white),
-        );
-      }
-    }
-  }
-
-  /// Build enhanced resolve dialog with notes option
-  Widget _buildResolveDialog() {
-    final notesController = TextEditingController();
-    
-    return AlertDialog(
-      title: const Text('Mark Emergency as Resolved'),
-      content: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Are you sure your emergency has been resolved? This will notify volunteers and require their confirmation for full resolution.',
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Resolution notes (optional):',
-              style: TextStyle(fontWeight: FontWeight.w500),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: notesController,
-              decoration: const InputDecoration(
-                hintText: 'How was your emergency resolved?',
-                border: OutlineInputBorder(),
-              ),
-              maxLines: 3,
-            ),
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop({'confirmed': false}),
-          child: const Text('Cancel'),
-        ),
-        ElevatedButton(
-          onPressed: () => Navigator.of(context).pop({
-            'confirmed': true,
-            'notes': notesController.text.trim(),
-          }),
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
-          child: const Text('Mark Resolved'),
-        ),
-      ],
-    );
-  }
-
-  /// Build enhanced cancel dialog with reason input
-  Widget _buildCancelDialog() {
-    final reasonController = TextEditingController();
-    String selectedReason = 'No longer needed';
-    
-    return StatefulBuilder(
-      builder: (context, setState) => AlertDialog(
-        title: const Text('Cancel Emergency'),
-        content: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Are you sure you want to cancel your emergency? This action will notify all volunteers.',
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Reason for cancellation:',
-                style: TextStyle(fontWeight: FontWeight.w500),
-              ),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                value: selectedReason,
-                decoration: const InputDecoration(
-                  border: OutlineInputBorder(),
-                ),
-                items: [
-                  'No longer needed',
-                  'False alarm',
-                  'Situation resolved',
-                  'Found alternative help',
-                  'Emergency passed',
-                  'Other',
-                ].map((reason) => DropdownMenuItem(
-                  value: reason,
-                  child: Text(reason),
-                )).toList(),
-                onChanged: (value) {
-                  setState(() {
-                    selectedReason = value!;
-                  });
-                },
-              ),
-              if (selectedReason == 'Other') ...[
-                const SizedBox(height: 12),
-                TextField(
-                  controller: reasonController,
-                  decoration: const InputDecoration(
-                    hintText: 'Please specify...',
-                    border: OutlineInputBorder(),
-                  ),
-                  maxLines: 2,
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop({'confirmed': false}),
-            child: const Text('Keep Emergency'),
-          ),
-          ElevatedButton(
-            onPressed: () => Navigator.of(context).pop({
-              'confirmed': true,
-              'reason': selectedReason == 'Other' 
-                  ? reasonController.text.trim()
-                  : selectedReason,
-            }),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Cancel Emergency'),
-          ),
-        ],
-      ),
-    );
   }
 
   /// Initiate volunteer response to an emergency
@@ -2384,29 +2050,26 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   List<Marker> _buildEmergencyMarkers() {
     List<Marker> emergencyMarkers = [];
     
-    AppLogger.logInfo('Building emergency markers: ${_activeEmergencies.length} active emergencies, user role: $_userRole');
+    AppLogger.logInfo('SOLO MAP DEBUG - Building emergency markers: ${_activeEmergencies.length} active emergencies, user role: $_userRole');
+
+    if (_activeEmergencies.isEmpty) {
+      AppLogger.logInfo('SOLO MAP DEBUG - No active emergencies to display');
+      return emergencyMarkers;
+    }
 
     for (final emergency in _activeEmergencies) {
-      AppLogger.logInfo('Processing emergency: ${emergency.attendeeName} (${emergency.emergencyId}), status: ${emergency.status.name}');
+      AppLogger.logInfo('SOLO MAP DEBUG - Processing emergency: ${emergency.attendeeName} (${emergency.emergencyId}), status: ${emergency.status.name}, location: ${emergency.location}');
       
       // Skip resolved emergencies
       if (emergency.status == EmergencyStatus.resolved) {
-        AppLogger.logInfo('Skipping resolved emergency: ${emergency.emergencyId}');
+        AppLogger.logInfo('SOLO MAP DEBUG - Skipping resolved emergency: ${emergency.emergencyId}');
         continue;
       }
 
-      // Use larger size for emergency markers to ensure visibility
-      final baseMarkerSize = _markerManager.getGeographicMarkerSize(
-        markerPosition: emergency.location,
-        geoMarkerType: geo.MarkerType.emergency,
-        minPixelSize: 40.0, // Increased minimum size
-        maxPixelSize: 80.0, // Increased maximum size
-      );
-      
-      // Add additional size boost for emergency markers
-      final markerSize = (baseMarkerSize * 1.2).clamp(40.0, 90.0);
-      final iconSize = (markerSize * 0.6).clamp(20.0, 36.0);
-      final pulseSize = markerSize * 1.5; // For pulsing animation
+      // Use fixed size for emergency markers for reliable visibility
+      const markerSize = 60.0; // Fixed size for testing
+      const iconSize = 28.0; // Fixed icon size
+      const pulseSize = 80.0; // Fixed pulse size
 
       // Create emergency marker with maximum visual prominence
       emergencyMarkers.add(
@@ -2418,9 +2081,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             alignment: Alignment.center,
             children: [
               // Pulsing background ring for animation
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 1000),
-                curve: Curves.easeInOut,
+              Container(
                 width: pulseSize,
                 height: pulseSize,
                 decoration: BoxDecoration(
@@ -2464,13 +2125,6 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     Icons.emergency,
                     color: Colors.white,
                     size: iconSize,
-                    shadows: const [
-                      Shadow(
-                        color: Colors.black54,
-                        offset: Offset(1, 1),
-                        blurRadius: 2,
-                      ),
-                    ],
                   ),
                 ),
               ),
@@ -2479,10 +2133,10 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
         ),
       );
       
-      AppLogger.logInfo('Created emergency marker for: ${emergency.attendeeName} at ${emergency.location}');
+      AppLogger.logInfo('SOLO MAP DEBUG - Created emergency marker for: ${emergency.attendeeName} at ${emergency.location}');
     }
 
-    AppLogger.logInfo('Emergency markers built: ${emergencyMarkers.length} markers created');
+    AppLogger.logInfo('SOLO MAP DEBUG - Emergency markers built: ${emergencyMarkers.length} markers created');
     return emergencyMarkers;
   }
 

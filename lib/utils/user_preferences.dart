@@ -398,6 +398,39 @@ class UserPreferences {
     return groupId.startsWith('default_');
   }
 
+  // Solo Mode Methods
+  static Future<void> setUserInSoloMode(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final key = 'solo_mode_${user.uid}';
+      await prefs.setBool(key, value);
+      debugPrint('🧑‍💻 Set solo mode for user ${user.uid}: $value');
+    }
+  }
+
+  static Future<bool> isUserInSoloMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final key = 'solo_mode_${user.uid}';
+      final soloMode = prefs.getBool(key) ?? false;
+      debugPrint('🧑‍💻 User ${user.uid} solo mode: $soloMode');
+      return soloMode;
+    }
+    return false;
+  }
+
+  static Future<void> clearSoloMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final key = 'solo_mode_${user.uid}';
+      await prefs.remove(key);
+      debugPrint('🧹 Cleared solo mode for user ${user.uid}');
+    }
+  }
+
   static Future<void> setHasSkippedGroup(bool value) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('has_skipped_group', value);
