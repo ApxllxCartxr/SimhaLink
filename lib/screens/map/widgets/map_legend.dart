@@ -167,6 +167,7 @@ class _MapLegendState extends State<MapLegend> with TickerProviderStateMixin {
           Icons.person_pin,
           'Group members',
           AppColors.mapAttendee,
+          subtitle: 'Only shown when >50m away',
         ),
       ]);
     } else if (widget.userRole == 'Volunteer') {
@@ -223,7 +224,7 @@ class _MapLegendState extends State<MapLegend> with TickerProviderStateMixin {
     return items;
   }
 
-  Widget _buildLegendItem(IconData icon, String label, Color color) {
+  Widget _buildLegendItem(IconData icon, String label, Color color, {String? subtitle}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Row(
@@ -235,12 +236,28 @@ class _MapLegendState extends State<MapLegend> with TickerProviderStateMixin {
             color: color,
           ),
           const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 11,
-              color: AppColors.textPrimary,
-            ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              if (subtitle != null) ...[
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: Colors.grey[600],
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ],
           ),
         ],
       ),
