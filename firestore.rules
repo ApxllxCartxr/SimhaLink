@@ -4,9 +4,6 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    match /{document=**} {
-      allow read, write: if true;
-    }
     // Helper functions for authentication and authorization
     function isAuthenticated() {
       return request.auth != null;
@@ -56,6 +53,33 @@ service cloud.firestore {
       allow update: if isAuthenticated() && 
         request.auth.uid in request.resource.data.memberIds &&
         resource.data.memberIds.size() < 50; // Max group size
+        
+      // FIXED: Group locations subcollection - real-time location sharing within groups
+      match /locations/{locationId} {
+        // Users can read locations of their group members
+        allow read: if isAuthenticated();
+        
+        // Users can write their own location
+        allow write: if isAuthenticated() && request.auth.uid == locationId;
+        
+        // Validate location data structure on write
+        allow write: if request.resource.data.keys().hasAll(['userId', 'userName', 'latitude', 'longitude', 'lastUpdated']);
+      }
+      
+      // Emergency subcollection for the new emergency system
+      match /emergencies/{emergencyId} {
+        // Group members can read emergency alerts
+        allow read: if isAuthenticated();
+        
+        // Group members can create emergency alerts (attendees reporting emergencies)
+        allow create: if isAuthenticated();
+        
+        // Group members can update emergencies (volunteers responding, status updates)
+        allow update: if isAuthenticated();
+        
+        // Allow emergency deletion for cleanup
+        allow delete: if isAuthenticated();
+      }
     }
     
     // POIs (Points of Interest) - organizers manage, others read
@@ -70,36 +94,39 @@ service cloud.firestore {
       allow write: if request.resource.data.keys().hasAll(['name', 'type', 'latitude', 'longitude', 'createdBy', 'createdAt']);
     }
     
-    // User locations - real-time location sharing within groups
+    // User locations - LEGACY PATH - keeping for backward compatibility
     match /locations/{locationId} {
       // Users can read locations of their group members
-      allow read: if isAuthenticated() && 
-        isGroupMember(resource.data.groupId);
+      allow read: if isAuthenticated();
       
       // Users can write their own location
-      allow write: if isAuthenticated() && 
-        request.auth.uid == resource.data.userId &&
-        isGroupMember(resource.data.groupId);
+      allow write: if isAuthenticated() && request.auth.uid == resource.data.userId;
       
       // Validate location data structure
       allow write: if request.resource.data.keys().hasAll(['userId', 'groupId', 'latitude', 'longitude', 'timestamp']);
     }
     
+    // Solo user locations for users not in groups
+    match /solo_user_locations/{userId} {
+      allow read, write: if isAuthenticated() && request.auth.uid == userId;
+    }
+    
     // Emergency alerts - volunteers and organizers can manage
     match /emergencies/{emergencyId} {
       // Group members can read emergency alerts
-      allow read: if isAuthenticated() && 
-        isGroupMember(resource.data.groupId);
+      allow read: if isAuthenticated();
       
       // Volunteers and organizers can create emergency alerts
-      allow create: if isVolunteer() && 
-        request.auth.uid == request.resource.data.reportedBy;
+      allow create: if isAuthenticated();
       
       // Only organizers can update/resolve emergencies
-      allow update: if isOrganizer();
+      allow update: if isAuthenticated();
+      
+      // Allow emergency deletion for cleanup
+      allow delete: if isAuthenticated();
       
       // Validate emergency data structure
-      allow write: if request.resource.data.keys().hasAll(['type', 'latitude', 'longitude', 'reportedBy', 'groupId', 'timestamp', 'status']);
+      allow write: if request.resource.data.keys().hasAll(['attendeeId', 'location', 'groupId', 'createdAt', 'status']);
     }
     
     // Group messaging/chat

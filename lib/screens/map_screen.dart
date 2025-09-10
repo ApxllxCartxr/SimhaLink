@@ -85,22 +85,17 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _initializeManagers();
-    _setupInitialData();
-  }
-
-  void _initializeManagers() {
+    // Initialize managers early with default values to prevent late init errors
     _locationManager = LocationManager(
       groupId: widget.groupId,
-      userRole: _userRole,
-      isEmergency: _isEmergency,
+      userRole: null, // Will be updated after fetching user role
+      isEmergency: false,
     );
-    // REMOVED: Old emergency manager that used UserLocation objects
-    // Only use Emergency objects via EmergencyManagementService
     _markerManager = MarkerManager(
-      userRole: _userRole,
-      isMapReady: _isMapReady,
+      userRole: null, // Will be updated after fetching user role
+      isMapReady: false,
     );
+    _setupInitialData();
   }
 
   /// Initialize emergency management and database listeners
@@ -347,6 +342,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
   Future<void> _setupInitialData() async {
     await _getUserRole();
+    // Update managers with the user role after fetching it
+    _locationManager.userRole = _userRole;
+    _markerManager = MarkerManager(
+      userRole: _userRole,
+      isMapReady: _isMapReady,
+    );
     await _setupLocationTracking();
     _listenToGroupLocations();
     _listenToPOIs();
@@ -360,7 +361,13 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   Future<void> _getUserRole() async {
     try {
       final user = FirebaseAuth.instance.currentUser;
-      if (user == null) return;
+      if (user == null) {
+        print('❌ DEBUG INIT: No authenticated user');
+        return;
+      }
+
+      print('🔍 DEBUG INIT: Getting user role for user: ${user.uid}');
+      print('🔍 DEBUG INIT: Group ID: ${widget.groupId}');
 
       final userDoc = await FirebaseFirestore.instance
           .collection('users')
@@ -368,36 +375,86 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           .get();
 
       if (userDoc.exists && mounted) {
+        final userData = userDoc.data();
+        print('🔍 DEBUG INIT: User document data: $userData');
+        
         setState(() {
           _userRole = userDoc.data()?['role'] as String?;
         });
         
-        // Reinitialize managers with the user role
-        _initializeManagers();
+        print('🔍 DEBUG INIT: User role after setup: $_userRole');
+      } else {
+        print('❌ DEBUG INIT: User document does not exist or widget not mounted');
       }
     } catch (e) {
+      print('❌ DEBUG INIT: Error getting user role: $e');
       AppLogger.logError('Error getting user role', e);
     }
   }
 
   Future<void> _setupLocationTracking() async {
+    print('🔧 DEBUG: Setting up location tracking...');
     final success = await _locationManager.setupLocationTracking();
-    if (!success) return;
+    if (!success) {
+      print('❌ DEBUG: Location tracking setup failed');
+      // Show user-friendly message about location permissions
+      if (mounted) {
+        _showTopSnackBar(
+          message: '⚠️ Location permission needed for real-time tracking',
+          backgroundColor: Colors.orange,
+          duration: const Duration(seconds: 5),
+          icon: const Icon(Icons.location_off, color: Colors.white),
+        );
+      }
+      return;
+    }
     
+    print('✅ DEBUG: Location tracking setup successful, starting location updates...');
     _locationManager.startLocationUpdates((locationData) {
+      print('📍 DEBUG: Location update received in map screen: lat=${locationData.latitude}, lng=${locationData.longitude}');
       setState(() {
         _locationManager.currentLocation = locationData;
       });
       _updateUserLocation(locationData);
     });
+    
+    // Try to get current location immediately
+    print('🔧 DEBUG: Getting initial current location...');
+    try {
+      final currentLocationData = await _locationManager.getCurrentLocation();
+      if (currentLocationData != null) {
+        print('📍 DEBUG: Initial location obtained: lat=${currentLocationData.latitude}, lng=${currentLocationData.longitude}');
+        setState(() {
+          _locationManager.currentLocation = currentLocationData;
+        });
+        _updateUserLocation(currentLocationData);
+      } else {
+        print('⚠️ DEBUG: Could not get initial location');
+      }
+    } catch (e) {
+      print('❌ DEBUG: Error getting initial location: $e');
+    }
+    
+    print('✅ DEBUG: Location update listener set up');
   }
 
   Future<void> _updateUserLocation(LocationData locationData) async {
     try {
+      print('🔍 DEBUG: Updating user location - lat: ${locationData.latitude}, lng: ${locationData.longitude}');
+      print('🔍 DEBUG: Group ID: ${widget.groupId}');
+      print('🔍 DEBUG: User role: $_userRole');
+      print('🔍 DEBUG: User ID: ${FirebaseAuth.instance.currentUser?.uid}');
+      print('🔍 DEBUG: Is emergency: $_isEmergency');
+      
       _locationManager.isEmergency = _isEmergency;
       _locationManager.userRole = _userRole;
       await _locationManager.updateUserLocationInFirebase(locationData);
-    } catch (e) {
+      
+      print('✅ DEBUG: Location update call completed successfully');
+    } catch (e, stackTrace) {
+      print('❌ DEBUG: Location update failed: $e');
+      print('❌ DEBUG: Stack trace: $stackTrace');
+      
       if (mounted) {
         ErrorHandler.showError(
           context,
@@ -409,34 +466,92 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
   }
 
   void _listenToGroupLocations() {
+    print('🔍 DEBUG: Starting to listen to group locations for groupId: ${widget.groupId}');
+    
     _groupLocationsSubscription = FirebaseFirestore.instance
         .collection('groups')
         .doc(widget.groupId)
         .collection('locations')
         .snapshots()
         .listen((snapshot) {
+      print('🔍 DEBUG: Location snapshot received - ${snapshot.docs.length} documents');
+      print('🔍 DEBUG: Group ID: ${widget.groupId}');
+      print('🔍 DEBUG: Current user role: $_userRole');
+      
+      // Log all documents received
+      for (final doc in snapshot.docs) {
+        print('🔍 DEBUG: Location document: ${doc.id} -> ${doc.data()}');
+      }
+      
       if (mounted) {
-        final allMembers = snapshot.docs
-            .map((doc) => UserLocation.fromMap(doc.data()))
-            .toList();
-        
-        List<UserLocation> filteredMembers;
-        if (_userRole == 'Attendee') {
-          final now = DateTime.now();
-          final activeThreshold = now.subtract(const Duration(minutes: 5));
+        try {
+          final allMembers = snapshot.docs
+              .map((doc) {
+                try {
+                  final userData = doc.data();
+                  print('🔍 DEBUG: Processing document ${doc.id} with data: $userData');
+                  
+                  final userLocation = UserLocation.fromMap(userData);
+                  print('🔍 DEBUG: Parsed UserLocation - User: ${userLocation.userName}, ID: ${userLocation.userId}, Updated: ${userLocation.lastUpdated}');
+                  return userLocation;
+                } catch (e) {
+                  print('❌ DEBUG: Error parsing document ${doc.id}: $e');
+                  return null;
+                }
+              })
+              .where((location) => location != null)
+              .cast<UserLocation>()
+              .toList();
           
-          filteredMembers = allMembers.where((member) {
-            return member.lastUpdated.isAfter(activeThreshold);
-          }).toList();
-        } else {
-          filteredMembers = allMembers;
+          print('🔍 DEBUG: Parsed ${allMembers.length} user locations from ${snapshot.docs.length} documents');
+          
+          List<UserLocation> filteredMembers;
+          if (_userRole == 'Attendee') {
+            final now = DateTime.now();
+            final activeThreshold = now.subtract(const Duration(minutes: 5));
+            
+            print('🔍 DEBUG: Filtering for attendees - now: $now, threshold: $activeThreshold');
+            
+            filteredMembers = allMembers.where((member) {
+              final isActive = member.lastUpdated.isAfter(activeThreshold);
+              final timeDiff = now.difference(member.lastUpdated).inMinutes;
+              print('🔍 DEBUG: Member ${member.userName} - Active: $isActive (last updated: ${member.lastUpdated}, ${timeDiff}min ago)');
+              return isActive;
+            }).toList();
+            
+            print('🔍 DEBUG: After filtering: ${filteredMembers.length} active members');
+          } else {
+            filteredMembers = allMembers;
+            print('🔍 DEBUG: No filtering applied for role: $_userRole');
+          }
+          
+          print('🔍 DEBUG: Final filtered members: ${filteredMembers.length}');
+          for (final member in filteredMembers) {
+            print('🔍 DEBUG: - ${member.userName} (${member.userId}) at ${member.latitude}, ${member.longitude}');
+          }
+          
+          setState(() {
+            _groupMembers = filteredMembers;
+          });
+          
+          print('✅ DEBUG: Group members state updated with ${_groupMembers.length} members');
+        } catch (e, stackTrace) {
+          print('❌ DEBUG: Error processing location snapshot: $e');
+          print('❌ DEBUG: Stack trace: $stackTrace');
         }
-        
-        setState(() {
-          _groupMembers = filteredMembers;
-        });
+      } else {
+        print('⚠️ DEBUG: Widget not mounted, skipping update');
+      }
+    }, onError: (error) {
+      print('❌ DEBUG: Error in group locations stream: $error');
+      
+      // Check for permission errors
+      if (error.toString().contains('permission-denied')) {
+        print('❌ DEBUG: Permission denied - check Firestore rules for groups/${widget.groupId}/locations');
       }
     });
+    
+    print('✅ DEBUG: Group locations listener set up for group: ${widget.groupId}');
   }
 
   void _listenToPOIs() {
@@ -914,6 +1029,141 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
     return earthRadius * c;
   }
 
+  /// Filter group members based on distance for proximity-aware visibility
+  List<UserLocation> _getVisibleGroupMembers() {
+    if (_locationManager.currentLocation == null) {
+      debugPrint('🚫 DEBUG: No current location available');
+      return [];
+    }
+
+    final currentLat = _locationManager.currentLocation!.latitude!;
+    final currentLng = _locationManager.currentLocation!.longitude!;
+
+    debugPrint('📍 DEBUG: Current location: $currentLat, $currentLng');
+    debugPrint('👥 DEBUG: Total group members: ${_groupMembers.length}');
+
+    // (Optional) future freshness threshold logic can live here
+    // final now = DateTime.now();
+    // final activeThreshold = now.subtract(const Duration(minutes: 15));
+
+    final visibleMembers = _groupMembers.where((member) {
+      // Exclude self
+      if (member.userId == FirebaseAuth.instance.currentUser?.uid) {
+        return false;
+      }
+
+      // If re‑enabling freshness filter:
+      // if (member.lastUpdated.isBefore(activeThreshold)) return false;
+
+      final distance = _calculateDistance(
+        currentLat,
+        currentLng,
+        member.latitude,
+        member.longitude,
+      );
+
+      final isVisible = distance > 50.0; // Visibility policy
+      debugPrint('📏 DEBUG: ${member.userName} is ${distance.round()}m away -> ${isVisible ? 'SHOW' : 'HIDE'}');
+      return isVisible;
+    }).toList();
+
+    debugPrint('✅ DEBUG: Showing ${visibleMembers.length} distant members out of ${_groupMembers.length}');
+    return visibleMembers;
+  }
+
+  /// Build current user's location marker
+  Marker _buildCurrentUserLocationMarker() {
+    final currentLocation = LatLng(
+      _locationManager.currentLocation!.latitude!,
+      _locationManager.currentLocation!.longitude!,
+    );
+
+    // Calculate marker size based on zoom level for geographic scaling
+    final baseMarkerSize = _markerManager.getGeographicMarkerSize(
+      markerPosition: currentLocation,
+      geoMarkerType: geo.MarkerType.userLocation,
+      minPixelSize: 30.0,
+      maxPixelSize: 60.0,
+    );
+
+    final markerSize = baseMarkerSize.clamp(30.0, 60.0);
+    final iconSize = (markerSize * 0.6).clamp(16.0, 24.0);
+
+    return Marker(
+      point: currentLocation,
+      width: markerSize,
+      height: markerSize,
+      child: GestureDetector(
+        onTap: () {
+          // Center map on current location when tapped
+          _mapController.move(currentLocation, _mapController.camera.zoom);
+          
+          // Show current location info
+          _showTopSnackBar(
+            message: '📍 You are here - Accuracy: ${(_locationManager.currentLocation!.accuracy ?? 0).round()}m',
+            backgroundColor: _isEmergency ? AppColors.mapEmergency : AppColors.mapCurrentUser,
+            duration: const Duration(seconds: 2),
+            icon: const Icon(Icons.my_location, color: Colors.white),
+          );
+        },
+        child: Stack(
+          alignment: Alignment.center,
+          children: [
+            // Outer ring for better visibility
+            Container(
+              width: markerSize,
+              height: markerSize,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white,
+                border: Border.all(
+                  color: _isEmergency ? AppColors.mapEmergency : AppColors.mapCurrentUser,
+                  width: 3.0,
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.3),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+            ),
+            // Inner marker
+            Container(
+              width: markerSize * 0.7,
+              height: markerSize * 0.7,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: _isEmergency ? AppColors.mapEmergency : AppColors.mapCurrentUser,
+              ),
+              child: Icon(
+                _isEmergency ? Icons.emergency : Icons.person,
+                color: Colors.white,
+                size: iconSize,
+              ),
+            ),
+            // Pulsing animation for emergency state
+            if (_isEmergency)
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 1000),
+                curve: Curves.easeInOut,
+                width: markerSize * 1.3,
+                height: markerSize * 1.3,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: AppColors.mapEmergency.withOpacity(0.5),
+                    width: 2.0,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// Start POI placement mode (Organizers only)
   void _startPOIPlacement() {
     if (_userRole != 'Organizer') return;
@@ -1159,6 +1409,9 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
       mapController: _mapController,
     );
 
+    // UPDATED: Get filtered group members based on distance
+    final visibleGroupMembers = _getVisibleGroupMembers();
+
     return Scaffold(
       floatingActionButton: null,
       body: Stack(
@@ -1206,6 +1459,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                 tileProvider: NetworkTileProvider(),
                 subdomains: const ['a', 'b', 'c', 'd'],
               ),
+              
               // Current location circle (lowest priority - should be underneath everything)
               if (_locationManager.currentLocation != null)
                 CircleLayer(
@@ -1225,6 +1479,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     ),
                   ],
                 ),
+              
               // Route polylines (before markers for better visibility)
               if (_currentRoute.isNotEmpty)
                 PolylineLayer(
@@ -1237,6 +1492,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                     ),
                   ],
                 ),
+              
               // POI markers (medium priority)
               MarkerLayer(
                 markers: _markerManager.buildPOIMarkers(
@@ -1245,11 +1501,12 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   onPOILongPress: _onPOILongPress,
                 ),
               ),
-              // User markers with clustering (higher priority than POI)
+              
+              // UPDATED: User markers with distance-based filtering
               MarkerClusterLayerWidget(
                 options: MarkerClusterLayerOptions(
                   markers: _markerManager.buildMarkers(
-                    groupMembers: _groupMembers,
+                    groupMembers: visibleGroupMembers, // Use filtered list
                     activeEmergencies: _activeEmergencies, // Pass active emergencies to avoid duplicates
                     nearbyVolunteers: [], // Disable old system
                     allVolunteers: [], // Disable old system
@@ -1276,6 +1533,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
                   },
                 ),
               ),
+              
+              // NEW: Your own location marker (above other user markers)
+              if (_locationManager.currentLocation != null)
+                MarkerLayer(
+                  markers: [
+                    _buildCurrentUserLocationMarker(),
+                  ],
+                ),
+              
               // Emergency markers (HIGHEST PRIORITY - Always on top)
               MarkerLayer(
                 markers: _buildEmergencyMarkers(),
@@ -1484,7 +1750,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
             ),
           ],
           
-          // Role info
+          // UPDATED: Role info with distance-aware member visibility info
           Positioned(
             top: 16,
             left: 16,
@@ -1492,17 +1758,35 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               color: Colors.white.withOpacity(0.9),
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                child: Text(
-                  _userRole == 'Attendee' ? 'Tap markers for directions' : 
-                  _userRole == 'Volunteer' ? 'Monitor emergencies & assist' :
-                  _userRole == 'Organizer' ? 
-                    (_isMarkerManagementMode ? 'Tap markers to manage them' : 'Long-press markers to manage them') : 
-                  'Map view',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: AppColors.textPrimary,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      _userRole == 'Attendee' ? 'Tap markers for directions' : 
+                      _userRole == 'Volunteer' ? 'Monitor emergencies & assist' :
+                      _userRole == 'Organizer' ? 
+                        (_isMarkerManagementMode ? 'Tap markers to manage them' : 'Long-press markers to manage them') : 
+                      'Map view',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: AppColors.textPrimary,
+                      ),
+                    ),
+                    // Show member visibility info
+                    if (_locationManager.currentLocation != null && _groupMembers.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        'Showing ${_getVisibleGroupMembers().length} distant members (>50m)',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: AppColors.textSecondary,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
               ),
             ),
@@ -2327,12 +2611,22 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           icon: const Icon(Icons.navigation, color: Colors.white),
         );
 
-        // TODO: Implement push notification to attendee
-        // NotificationService.sendToUser(
-        //   userId: emergency.attendeeId,
-        //   title: 'Help is on the way!',
-        //   body: 'A volunteer is approximately ${estimatedTime} minutes away.',
-        // );
+        // Use the enhanced notification system to notify the attendee
+        final currentUser = FirebaseAuth.instance.currentUser;
+        if (currentUser != null) {
+          await EmergencyManagementService.notifyAttendeeOfVolunteerStatus(
+            emergencyId: emergency.emergencyId,
+            volunteerId: currentUser.uid,
+            volunteerName: currentUser.displayName ?? 'Volunteer',
+            newStatus: EmergencyVolunteerStatus.responding,
+            volunteerLocation: _locationManager.currentLocation != null
+                ? LatLng(
+                    _locationManager.currentLocation!.latitude!,
+                    _locationManager.currentLocation!.longitude!,
+                  )
+                : null,
+          );
+        }
       }
     } catch (e) {
       AppLogger.logError('Error notifying attendee', e);
