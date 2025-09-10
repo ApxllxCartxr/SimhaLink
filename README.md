@@ -1,5 +1,7 @@
 # 🛰️ SimhaLink
 
+> 📦 Download: [Latest APK (Google Drive)](https://drive.google.com/file/d/1X5Xs2Z5tLEQ3Snq2kQbv4ssPqpm9EvHM/view?usp=sharing) · Or visit the [Releases](../../releases) tab for versioned builds.
+
 ## Intelligent Crowd Safety, Coordination & Ritual Experience Infrastructure
 
 **Mission:** Make large-scale spiritual, cultural, and civic gatherings safer, more inclusive, and data-informed — without sacrificing tradition.
@@ -42,7 +44,6 @@ SimhaLink is a **Flutter + Firebase powered crowd intelligence and coordination 
 	<img src="assets/images/i2.jpg" alt="Screenshot 2" width="180" />
 	<img src="assets/images/i3.jpg" alt="Screenshot 3" width="180" />
 	<img src="assets/images/i4.jpg" alt="Screenshot 4" width="180" />
-	<img src="assets/images/i5.jpg" alt="Screenshot 5" width="180" />
 </div>
 <div align="center">
 	<img src="assets/images/i6.jpg" alt="Screenshot 6" width="180" />
