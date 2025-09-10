@@ -475,16 +475,15 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
           }
         }
         
-        // Check if emergency exists and is not fake
+        // FIXED: Check if emergency is active (not cancelled, fake, or resolved)
         // Let the widget handle its own resolution logic
-        final hasActiveEmergency = emergency != null && 
-            emergency.status != EmergencyStatus.fake;
+        final hasActiveEmergency = emergency != null && emergency.isActive;
         
-        print('🎯 Emergency status check: hasActive=$hasActiveEmergency, status=${emergency?.status.name}, isFullyResolved=${emergency?.isFullyResolved}');
+        print('🎯 Emergency status check: hasActive=$hasActiveEmergency, status=${emergency?.status.name}, isActive=${emergency?.isActive}, isFullyResolved=${emergency?.isFullyResolved}');
         
         setState(() {
           _userActiveEmergency = hasActiveEmergency ? emergency : null;
-          // Only consider emergency active if not fully resolved
+          // Only consider emergency active if it's actually active and not fully resolved
           _isEmergency = hasActiveEmergency && !emergency.isFullyResolved;
           _locationManager.isEmergency = _isEmergency;
         });
@@ -1405,7 +1404,7 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
               },
             ),
             Positioned(
-              top: 80, // Below app bar
+              bottom: 7, // Below app bar
               left: 16,
               right: 16,
               child: AttendeeEmergencyStatusWidget(
@@ -2043,13 +2042,33 @@ class _MapScreenState extends State<MapScreen> with TickerProviderStateMixin {
 
       if (result == null || result['confirmed'] != true) return;
 
-      print('� Attendee cancelling emergency: ${_userActiveEmergency!.emergencyId}');
+      print('🚫 Attendee cancelling emergency: ${_userActiveEmergency!.emergencyId}');
 
       // Use enhanced cancellation system
       await EmergencyManagementService.cancelEmergency(
         emergencyId: _userActiveEmergency!.emergencyId,
         reason: result['reason'] ?? 'Cancelled by attendee',
       );
+
+      // FIXED: Add the same state updates as FAB toggle
+      setState(() {
+        _isEmergency = false;
+        _userActiveEmergency = null; // Clear the active emergency
+        _locationManager.isEmergency = false;
+      });
+      
+      // FIXED: Update location manager to normal tracking (same as FAB)
+      _locationManager.updateEmergencyStatus(false);
+
+      // FIXED: Show the same success message style as FAB
+      if (mounted) {
+        _showTopSnackBar(
+          message: '✅ Emergency cancelled! All volunteers have been notified.',
+          backgroundColor: Colors.green, // Same color as FAB success
+          duration: const Duration(seconds: 3),
+          icon: const Icon(Icons.check_circle, color: Colors.white),
+        );
+      }
 
       print('✅ Emergency successfully cancelled by attendee');
     } catch (e) {

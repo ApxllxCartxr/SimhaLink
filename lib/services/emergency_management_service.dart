@@ -739,20 +739,60 @@ class EmergencyManagementService {
 
   /// Notify volunteers of full resolution
   static Future<void> _notifyVolunteersOfFullResolution(Emergency emergency) async {
-    // Implementation can be added for push notifications or other alerts
-    AppLogger.logInfo('Volunteers notified of full resolution: ${emergency.emergencyId}');
+    try {
+      // Send notification to all volunteers who responded
+      for (final response in emergency.responses.values) {
+        // For now, send global notification - could be personalized per volunteer
+        InAppNotificationService.instance.showNotification(
+          title: '✅ Emergency Resolved',
+          message: 'Emergency in ${emergency.groupId} has been fully resolved by all parties.',
+          type: InAppNotificationType.success,
+        );
+        // Break after first to avoid duplicate notifications
+        break;
+      }
+      
+      // If no volunteers responded, still log completion
+      if (emergency.responses.isEmpty) {
+        AppLogger.logInfo('No volunteers to notify for emergency: ${emergency.emergencyId}');
+      }
+      AppLogger.logInfo('Volunteers notified of full resolution: ${emergency.emergencyId}');
+    } catch (e) {
+      AppLogger.logError('Error notifying volunteers of full resolution', e);
+    }
   }
 
   /// Notify attendee of full resolution
   static Future<void> _notifyAttendeeOfFullResolution(Emergency emergency) async {
-    // Implementation can be added for push notifications or other alerts
-    AppLogger.logInfo('Attendee notified of full resolution: ${emergency.emergencyId}');
+    try {
+      InAppNotificationService.instance.showNotification(
+        title: '🎉 Emergency Fully Resolved',
+        message: 'Your emergency has been completely resolved by all parties. Thank you for using our emergency system safely.',
+        type: InAppNotificationType.success,
+      );
+      AppLogger.logInfo('Attendee notified of full resolution: ${emergency.emergencyId}');
+    } catch (e) {
+      AppLogger.logError('Error notifying attendee of full resolution', e);
+    }
   }
 
   /// Notify volunteers that attendee has resolved
   static Future<void> _notifyVolunteersAttendeeResolved(Emergency emergency) async {
-    // Implementation can be added for push notifications or other alerts
-    AppLogger.logInfo('Volunteers notified attendee resolved: ${emergency.emergencyId}');
+    try {
+      // Send notification to all responding volunteers
+      if (emergency.responses.isNotEmpty) {
+        // Could implement individual notifications per volunteer here
+        InAppNotificationService.instance.showNotification(
+          title: '👍 Attendee Marked Resolved',
+          message: 'The attendee has marked their emergency as resolved. Please confirm if you agree.',
+          type: InAppNotificationType.info,
+        );
+      }
+      
+      AppLogger.logInfo('Volunteers notified attendee resolved: ${emergency.emergencyId}');
+    } catch (e) {
+      AppLogger.logError('Error notifying volunteers attendee resolved', e);
+    }
   }
 
   /// Notify attendee that volunteer has resolved
@@ -934,50 +974,40 @@ class EmergencyManagementService {
     }
   }
 
-  /// Cancel emergency by attendee
+  /// Cancel emergency by attendee - FIXED to match FAB toggle functionality
   static Future<void> cancelEmergency({
     required String emergencyId,
     required String reason,
   }) async {
     try {
-      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
-      if (emergency == null) throw Exception('Emergency not found');
-
       final currentUser = FirebaseAuth.instance.currentUser;
       if (currentUser == null) throw Exception('User not authenticated');
 
-      // Update emergency status to cancelled
-      await EmergencyDatabaseService.updateEmergencyStatus(
-        emergencyId,
-        EmergencyStatus.resolved, // Use resolved status with special notes
-      );
+      print('🚫 DEBUG: Cancelling emergency: $emergencyId with reason: $reason');
 
-      // Add cancellation note
-      final updatedEmergency = emergency.copyWith(
-        resolvedBy: emergency.resolvedBy.copyWith(
-          attendee: true,
-          attendeeResolvedAt: DateTime.now(),
-          attendeeResolutionNotes: 'CANCELLED: $reason',
-        ),
-        updatedAt: DateTime.now(),
-      );
+      // FIXED: Get emergency data BEFORE cleanup (to notify volunteers)
+      final emergency = await EmergencyDatabaseService.getEmergency(emergencyId);
+      if (emergency == null) throw Exception('Emergency not found');
 
-      await EmergencyDatabaseService.updateEmergency(emergencyId, updatedEmergency);
-
-      // Notify volunteers
+      // Notify volunteers BEFORE cleanup
       await _notifyVolunteersCancellation(emergency, reason);
 
-      // Show cancellation notification
+      // FIXED: Use the same cleanup method as FAB toggle for consistency
+      await EmergencyDatabaseService.resolveEmergencyWithCleanup(emergencyId);
+
+      print('✅ DEBUG: Emergency cleanup completed');
+
+      // FIXED: Use the same notification style as FAB toggle
       InAppNotificationService.instance.showNotification(
-        title: '🚫 Emergency Cancelled',
-        message: 'Your emergency has been cancelled. All volunteers have been notified.',
-        type: InAppNotificationType.warning,
+        title: '✅ Emergency Cancelled',
+        message: 'Your emergency has been cancelled successfully. All volunteers have been notified.',
+        type: InAppNotificationType.success, // Changed to success to match FAB
       );
 
-      // Stop location tracking
+      // FIXED: Use the same location tracking cleanup as FAB
       await _stopAttendeeLocationTracking();
 
-      AppLogger.logInfo('Emergency cancelled: $emergencyId - $reason');
+      AppLogger.logInfo('Emergency cancelled with cleanup: $emergencyId - $reason');
     } catch (e) {
       AppLogger.logError('Error cancelling emergency', e);
       
@@ -1137,12 +1167,27 @@ class EmergencyManagementService {
 
   /// Notify volunteers about emergency cancellation
   static Future<void> _notifyVolunteersCancellation(Emergency emergency, String reason) async {
-    // Send notifications to all responding volunteers
-    for (final response in emergency.responses.values) {
-      if (response.status != EmergencyVolunteerStatus.unavailable) {
-        // This would be implemented to send individual notifications
-        AppLogger.logInfo('Notifying volunteer ${response.volunteerName} of cancellation');
+    try {
+      // Send notifications to all responding volunteers
+      for (final response in emergency.responses.values) {
+        if (response.status != EmergencyVolunteerStatus.unavailable) {
+          // Send notification to each responding volunteer
+          InAppNotificationService.instance.showNotification(
+            title: '❌ Emergency Cancelled',
+            message: 'Emergency in ${emergency.groupId} has been cancelled by the attendee. Reason: $reason',
+            type: InAppNotificationType.warning,
+          );
+          
+          AppLogger.logInfo('Notifying volunteer ${response.volunteerName} of cancellation');
+        }
       }
+      
+      // If no volunteers to notify
+      if (emergency.responses.isEmpty) {
+        AppLogger.logInfo('No volunteers to notify of cancellation for emergency: ${emergency.emergencyId}');
+      }
+    } catch (e) {
+      AppLogger.logError('Error notifying volunteers of cancellation', e);
     }
   }
 

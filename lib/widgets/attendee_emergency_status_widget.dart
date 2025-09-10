@@ -149,10 +149,11 @@ class _AttendeeEmergencyStatusWidgetState extends State<AttendeeEmergencyStatusW
     print('🔧 DEBUG: Emergency status: ${emergency.status.name}');
     print('🔧 DEBUG: Emergency resolvedBy - attendee: ${emergency.resolvedBy.attendee}, hasVolunteerCompleted: ${emergency.resolvedBy.hasVolunteerCompleted}');
     print('🔧 DEBUG: Emergency isFullyResolved: ${emergency.isFullyResolved}, canBeFullyResolved: ${emergency.resolvedBy.canBeFullyResolved}');
+    print('🔧 DEBUG: Emergency isActive: ${emergency.isActive}');
     
-    // IMPORTANT: Don't render if emergency is fully resolved
-    if (emergency.isFullyResolved) {
-      print('🎯 DEBUG: Emergency is fully resolved, hiding widget - attendee: ${emergency.resolvedBy.attendee}, volunteer: ${emergency.resolvedBy.hasVolunteerCompleted}');
+    // FIXED: Hide widget if emergency is no longer active (cancelled, fake, resolved) OR fully resolved
+    if (!emergency.isActive || emergency.isFullyResolved) {
+      print('🎯 DEBUG: Emergency is inactive or fully resolved, hiding widget - status: ${emergency.status.name}, isActive: ${emergency.isActive}, isFullyResolved: ${emergency.isFullyResolved}');
       return const SizedBox.shrink();
     }
     
