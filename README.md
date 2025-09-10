@@ -1,5 +1,13 @@
 # 🛰️ SimhaLink
 
+![SimhaLink Banner](assets/images/top.png)
+
+[![Flutter](https://img.shields.io/badge/Flutter-3.x-blue?logo=flutter&logoColor=white)](https://flutter.dev)
+[![Dart](https://img.shields.io/badge/Dart-3.x-0175C2?logo=dart&logoColor=white)](https://dart.dev)
+[![Firebase](https://img.shields.io/badge/Firebase-Enabled-ffca28?logo=firebase&logoColor=black)](https://firebase.google.com)
+[![Release](https://img.shields.io/github/v/release/ApxllxCartxr/SimhaLink?display_name=release&sort=semver)](../../releases)
+[![License](https://img.shields.io/github/license/ApxllxCartxr/SimhaLink)](LICENSE)
+
 > 📦 Download: [Latest APK (Google Drive)](https://drive.google.com/file/d/1X5Xs2Z5tLEQ3Snq2kQbv4ssPqpm9EvHM/view?usp=sharing) · Or visit the [Releases](../../releases) tab for versioned builds.
 
 ## Intelligent Crowd Safety, Coordination & Ritual Experience Infrastructure
@@ -9,6 +17,7 @@
 ---
 
 ## 🧭 Problem Landscape
+
 Mass gatherings (pilgrimages, fairs, festivals, civic events) face recurring challenges:
 
 | Challenge | Real-World Impact |
@@ -25,6 +34,7 @@ Mass gatherings (pilgrimages, fairs, festivals, civic events) face recurring cha
 ---
 
 ## 💡 Solution Overview
+
 SimhaLink is a **Flutter + Firebase powered crowd intelligence and coordination platform** featuring:
 
 - 🔍 Live, layered maps (medical, water, accessibility, historic, emergency zones)
