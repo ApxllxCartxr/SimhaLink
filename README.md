@@ -34,6 +34,26 @@ SimhaLink is a **Flutter + Firebase powered crowd intelligence and coordination 
 
 > Designed to scale from a localized gathering to multi-venue pilgrimages with hundreds of thousands of participants.
 
+### 📱 Screenshots
+
+<!-- markdownlint-disable MD033 -->
+<div align="center">
+	<img src="assets/images/i1.jpg" alt="Screenshot 1" width="180" />
+	<img src="assets/images/i2.jpg" alt="Screenshot 2" width="180" />
+	<img src="assets/images/i3.jpg" alt="Screenshot 3" width="180" />
+	<img src="assets/images/i4.jpg" alt="Screenshot 4" width="180" />
+	<img src="assets/images/i5.jpg" alt="Screenshot 5" width="180" />
+</div>
+<div align="center">
+	<img src="assets/images/i6.jpg" alt="Screenshot 6" width="180" />
+	<img src="assets/images/i7.jpg" alt="Screenshot 7" width="180" />
+	<img src="assets/images/i8.jpg" alt="Screenshot 8" width="180" />
+	<img src="assets/images/i9.jpg" alt="Screenshot 9" width="180" />
+</div>
+<!-- markdownlint-enable MD033 -->
+
+Note: Screens represent in-development UI; flows and visuals may evolve.
+
 ---
 
 ## 🔑 Core Feature Set
